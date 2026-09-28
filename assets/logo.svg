@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="400" viewBox="0 0 800 400" role="img" aria-label="Falcon Finalysis">
+<rect x="55" y="105" width="150" height="150" rx="28" fill="#102F50"/>
+<path d="M72 125 98 142 170 145 132 130Z" fill="#F2C45E"/>
+<path d="M82 148 105 165 165 165 130 151Z" fill="#E8B84F"/>
+<path d="M92 171 112 187 153 184 128 174Z" fill="#DDAE45"/>
+<path d="M111 225V140H178V159H135V176H169V195H135V225Z" fill="#FFFFFF"/>
+<path d="M150 232V210H163V232ZM168 232V195H181V232ZM186 232V178H199V232Z" fill="#35C2C5"/>
+<text x="230" y="218" fill="#102F50" font-family="Segoe UI,Arial,Helvetica,sans-serif" font-size="70" font-weight="700">Falcon Finalysis</text>
+</svg>

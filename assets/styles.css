@@ -1,0 +1,27 @@
+<style>
+:root {--ff-navy:#173859;--ff-teal:#008C95;--ff-ink:#152B46;--ff-muted:#5E7188;--ff-line:#DCE5EE;--ff-surface:#FFFFFF;--ff-bg:#F5F8FB}
+.block-container {padding-top:3.2rem;padding-bottom:3rem;max-width:1460px}
+[data-testid="stAppViewContainer"] {background:var(--ff-bg)}
+[data-testid="stHeader"] {background:rgba(245,248,251,.92)}
+[data-testid="stSidebar"] {background:#F0F5F9;border-right:1px solid var(--ff-line)}
+[data-testid="stSidebar"] [data-testid="stImage"] {background:#F8FBFD;border:1px solid #DCE7EF;border-radius:14px;padding:4px 8px;overflow:hidden}
+[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {border-radius:9px;padding:.48rem .7rem;margin:.08rem 0;color:#29435F;background:transparent;transition:background .15s ease,color .15s ease}
+[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"]:hover {background:#E1EBF3;color:#0E334F}
+[data-testid="stSidebar"] [data-testid="stPageLink-NavLink"][aria-current="page"] {background:#D5EDEF;color:#075D64;border-left:3px solid var(--ff-teal);font-weight:650}
+[data-testid="stMetric"] {background:var(--ff-surface);border:1px solid var(--ff-line);border-radius:14px;padding:18px 20px;box-shadow:0 3px 12px rgba(23,56,89,.045)}
+[data-testid="stMetricLabel"] {font-size:12px;letter-spacing:.2px;color:var(--ff-muted)}
+[data-testid="stMetricValue"] {font-size:1.75rem;font-weight:680;letter-spacing:-.6px;color:var(--ff-ink)}
+h1 {font-size:2.25rem!important;font-weight:730!important;letter-spacing:-1px;color:var(--ff-ink)!important}
+h2 {font-size:1.35rem!important;letter-spacing:-.3px;color:var(--ff-ink)!important}
+h3 {font-size:1.08rem!important;color:var(--ff-ink)!important}
+[data-testid="stCaptionContainer"] {letter-spacing:.18px;color:var(--ff-muted)}
+[data-testid="stExpander"] {border-radius:12px;border-color:var(--ff-line);background:var(--ff-surface)}
+.stButton button,.stDownloadButton button,.stLinkButton a {border-radius:9px;font-weight:600;min-height:2.55rem}
+[data-testid="stVerticalBlockBorderWrapper"] {border-radius:14px;border-color:var(--ff-line);background:var(--ff-surface);box-shadow:0 2px 10px rgba(23,56,89,.035)}
+[data-testid="stTabs"] [role="tablist"] {gap:.35rem;border-bottom:1px solid var(--ff-line)}
+[data-testid="stTabs"] button[role="tab"] {border-radius:9px 9px 0 0;padding:.65rem .9rem;color:#4B6178}
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {color:#006A72;font-weight:650;background:#E8F4F5}
+[data-testid="stDataFrame"] {border:1px solid var(--ff-line);border-radius:12px;overflow:hidden}
+[data-baseweb="input"]>div,[data-baseweb="select"]>div,textarea {border-radius:9px!important}
+@media (max-width:900px){.block-container{padding-top:2rem}.stColumn{min-width:100%!important}h1{font-size:1.85rem!important}}
+</style>
