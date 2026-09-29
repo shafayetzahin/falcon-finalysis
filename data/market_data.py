@@ -12,16 +12,12 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import ssl
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 from core.config import FIELDS
-
-try:  # Use the operating system's trusted certificate store when available.
-    import truststore
-    truststore.inject_into_ssl()
-except ImportError:  # requests still uses its normal certifi verification.
-    pass
 
 
 # DSE's redesigned site moved the original company and archive views to the
@@ -32,6 +28,43 @@ HEADERS = {"User-Agent": "Falcon Finalysis/1.1 (local educational analytics; con
 MAX_RESPONSE = 8 * 1024 * 1024
 TICKER_RE = re.compile(r"^[A-Z0-9&()._-]{1,24}$")
 BUNDLED_TICKERS = Path(__file__).with_name("tickers.json")
+CERTIFICATES = Path(__file__).with_name("certificates")
+EXCHANGE_INTERMEDIATES = {
+    "old.dsebd.org": CERTIFICATES / "sectigo-dv-r36.pem",
+    "www.cse.com.bd": CERTIFICATES / "globalsign-r3-dv-2020.pem",
+}
+
+
+class _VerifiedExchangeAdapter(HTTPAdapter):
+    """Supply a published intermediate omitted by an exchange web server."""
+
+    def __init__(self, certificate: Path):
+        context = ssl.create_default_context(cafile=str(certificate))
+        # These files are CA intermediates rather than self-signed roots. OpenSSL
+        # still validates the server signature, dates and hostname before using
+        # the selected intermediate as this host-scoped chain's trust anchor.
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+        self._ssl_context = context
+        super().__init__()
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = self._ssl_context
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._ssl_context
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
+def _verified_exchange_session(url: str, session: requests.Session | None = None) -> requests.Session | None:
+    """Return a verified session only when the named exchange omits its CA chain."""
+    for host, certificate in EXCHANGE_INTERMEDIATES.items():
+        prefix = f"https://{host}/"
+        if url.startswith(prefix):
+            session = session or requests.Session()
+            session.mount(prefix, _VerifiedExchangeAdapter(certificate))
+            return session
+    return None
 
 
 @dataclass(frozen=True)
@@ -71,6 +104,7 @@ def _dates(start: date, end: date) -> tuple[str, str]:
 
 def _request(method: str, url: str, session: requests.Session | None = None, **kwargs) -> requests.Response:
     try:
+        session = _verified_exchange_session(url, session) or session
         caller = session.request if session else requests.request
         request_headers = {**HEADERS, **kwargs.pop("headers", {})}
         response = caller(method, url, headers=request_headers, timeout=(8, 30), **kwargs)

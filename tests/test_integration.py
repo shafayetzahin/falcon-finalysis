@@ -2,6 +2,7 @@
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+import ssl
 import pytest
 import pandas as pd
 from openpyxl import load_workbook
@@ -14,7 +15,7 @@ from reports.pdf_report import pdf_report
 from data.document_import import extract_workbook, extract_pdfs, apply_scale
 from data.market_data import (_annual_metrics, _standardize_dse, read_price_file,
                               ticker_list, bundled_ticker_list, bundled_ticker_catalog,
-                              price_history)
+                              price_history, _verified_exchange_session)
 
 
 def test_ticker_suggestions_support_cse_suffixes_and_bundled_fallback(monkeypatch):
@@ -273,6 +274,17 @@ def test_dse_history_uses_official_legacy_archive(monkeypatch):
     assert seen['params']['inst'] == 'SQURPHARMA'
     assert frame.Close.tolist() == [213.5]
     assert source.startswith('https://old.dsebd.org/')
+
+
+def test_exchange_tls_sessions_are_host_scoped_and_verified():
+    for url in ('https://old.dsebd.org/day_end_archive.php',
+                'https://www.cse.com.bd/market/marketprice'):
+        session = _verified_exchange_session(url)
+        adapter = session.get_adapter(url)
+        assert adapter._ssl_context.verify_mode == ssl.CERT_REQUIRED
+        assert adapter._ssl_context.check_hostname
+        assert adapter._ssl_context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
+    assert _verified_exchange_session('https://old.dsebd.org.example.com/') is None
 
 
 def test_exchange_annual_metrics_prefill_copies_only_direct_net_income():
