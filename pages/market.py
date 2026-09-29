@@ -200,8 +200,8 @@ if (isinstance(history, pd.DataFrame) and not history.empty
                    (f'{age_minutes} minutes old' if age_minutes is not None else 'No timestamp'))
     market_source = st.session_state.get('market_source', 'Not recorded')
     st.caption(f"Source: {market_source} · retrieved {fetched_text or 'time unavailable'}")
-    if ('dse.com.bd/company/' in market_source
-            and shown['Date'].min().date() > start):
+    unavailable_days = (shown['Date'].min().date() - start).days
+    if ('dse.com.bd/company/' in market_source and unavailable_days > 7):
         st.warning(f"DSE's current public company page supplied records from {shown['Date'].min():%Y-%m-%d}. "
                    'Earlier dates in the selected period were unavailable from that page; use the exchange download fallback if needed.')
     if duplicate_rows or missing_close:
