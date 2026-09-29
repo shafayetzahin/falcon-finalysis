@@ -24,7 +24,9 @@ except ImportError:  # requests still uses its normal certifi verification.
     pass
 
 
-DSE = "https://www.dsebd.org"
+# DSE's redesigned site moved the original company and archive views to the
+# official legacy host. The former www.dsebd.org routes now return HTTP 410.
+DSE = "https://old.dsebd.org"
 CSE = "https://www.cse.com.bd"
 HEADERS = {"User-Agent": "Falcon Finalysis/1.1 (local educational analytics; contact: local-user)"}
 MAX_RESPONSE = 8 * 1024 * 1024

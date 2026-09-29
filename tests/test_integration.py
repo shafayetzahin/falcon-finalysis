@@ -1,4 +1,5 @@
 """Export structure, round trips and Streamlit page/workflow smoke checks."""
+from datetime import date
 from io import BytesIO
 from pathlib import Path
 import pytest
@@ -12,7 +13,8 @@ from reports.excel_report import input_template, excel_report, exchange_input_te
 from reports.pdf_report import pdf_report
 from data.document_import import extract_workbook, extract_pdfs, apply_scale
 from data.market_data import (_annual_metrics, _standardize_dse, read_price_file,
-                              ticker_list, bundled_ticker_list, bundled_ticker_catalog)
+                              ticker_list, bundled_ticker_list, bundled_ticker_catalog,
+                              price_history)
 
 
 def test_ticker_suggestions_support_cse_suffixes_and_bundled_fallback(monkeypatch):
@@ -247,6 +249,30 @@ def test_market_history_cleaning_upload_and_workbook():
     assert book.sheetnames == ['Summary', 'Price History', 'Monthly Summary', 'Sources']
     assert book['Price History'].freeze_panes == 'A2'
     assert len(book['Summary']._charts) == 1
+
+
+def test_dse_history_uses_official_legacy_archive(monkeypatch):
+    raw = pd.DataFrame({'DATE': ['2026-09-28'], 'TRADING CODE': ['SQURPHARMA'],
+                        'OPENP*': [212.0], 'HIGH': [214.0], 'LOW': [211.0],
+                        'CLOSEP*': [213.5], 'LTP*': [213.5], 'YCP': [212.0],
+                        'TRADE': [100], 'VALUE (MN)': [2.1], 'VOLUME': [10000]})
+    seen = {}
+
+    class Response:
+        text = '<html></html>'
+        url = 'https://old.dsebd.org/day_end_archive.php?example=1'
+
+    def fake_request(method, url, **kwargs):
+        seen.update(method=method, url=url, params=kwargs.get('params'))
+        return Response()
+
+    monkeypatch.setattr('data.market_data._request', fake_request)
+    monkeypatch.setattr('data.market_data._tables', lambda html: [raw])
+    frame, source = price_history('DSE', 'SQURPHARMA', date(2026, 9, 1), date(2026, 9, 29))
+    assert seen['url'] == 'https://old.dsebd.org/day_end_archive.php'
+    assert seen['params']['inst'] == 'SQURPHARMA'
+    assert frame.Close.tolist() == [213.5]
+    assert source.startswith('https://old.dsebd.org/')
 
 
 def test_exchange_annual_metrics_prefill_copies_only_direct_net_income():

@@ -1,7 +1,7 @@
 {
   "fetched_at": "2026-09-20T06:39:19+00:00",
   "sources": {
-    "DSE": "https://www.dsebd.org/data_archive.php",
+    "DSE": "https://old.dsebd.org/data_archive.php",
     "CSE": "https://www.cse.com.bd/market/marketprice"
   },
   "exchanges": {
