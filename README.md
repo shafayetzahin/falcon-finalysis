@@ -4,12 +4,15 @@
 
 **From Financial Data to Financial Insight**
 
+**Live app:** [falcon-finalysis](https://maeqqfkpaqxeomfknnsfaa.streamlit.app/)
+
 ![Falcon Finalysis concept C wordmark](assets/logo-active.png)
 
-A local-first Python application that turns annual financial statements into ratios,
+A local-first Python application, with a public hosted demo, that turns annual financial statements into ratios,
 cash-cycle analysis, explainable signals, operating scenarios and executive reports.
 Built for analysts, finance students and SME decision-makers who need to investigate
-performance without connecting company data to an external service.
+performance through an inspectable workflow. The hosted app uses temporary,
+session-isolated storage; use the local version for confidential company data.
 
 > Demo: **Apex Consumer Industries Ltd.**, a fictional manufacturer with five
 > reconciled fiscal years (2021–2025). No actual company financial data is included.
