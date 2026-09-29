@@ -15,7 +15,7 @@ from reports.pdf_report import pdf_report
 from data.document_import import extract_workbook, extract_pdfs, apply_scale
 from data.market_data import (_annual_metrics, _standardize_dse, read_price_file,
                               ticker_list, bundled_ticker_list, bundled_ticker_catalog,
-                              price_history, _verified_exchange_session)
+                              price_history, _verified_exchange_session, _modern_dse_history)
 
 
 def test_ticker_suggestions_support_cse_suffixes_and_bundled_fallback(monkeypatch):
@@ -274,6 +274,16 @@ def test_dse_history_uses_official_legacy_archive(monkeypatch):
     assert seen['params']['inst'] == 'SQURPHARMA'
     assert frame.Close.tolist() == [213.5]
     assert source.startswith('https://old.dsebd.org/')
+
+
+def test_current_dse_company_page_history_is_read_without_estimated_value():
+    html = (r'<script>\"series\":[{\"t\":\"28 Sep\",\"date\":\"2026-09-28\",'
+            r'\"price\":213.5,\"open\":212.0,\"high\":214.0,\"low\":211.0,'
+            r'\"trades\":100,\"volume\":10000}],\"suggestedCode\":\"$undefined\"</script>')
+    frame = _modern_dse_history(html, 'SQURPHARMA', date(2026, 9, 1), date(2026, 9, 29))
+    assert frame.Close.tolist() == [213.5]
+    assert frame.Ticker.tolist() == ['SQURPHARMA']
+    assert frame['Value (mn)'].isna().all()
 
 
 def test_exchange_tls_sessions_are_host_scoped_and_verified():

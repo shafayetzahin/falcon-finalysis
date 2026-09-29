@@ -23,6 +23,7 @@ from core.config import FIELDS
 # DSE's redesigned site moved the original company and archive views to the
 # official legacy host. The former www.dsebd.org routes now return HTTP 410.
 DSE = "https://old.dsebd.org"
+DSE_CURRENT = "https://www.dse.com.bd"
 CSE = "https://www.cse.com.bd"
 HEADERS = {"User-Agent": "Falcon Finalysis/1.1 (local educational analytics; contact: local-user)"}
 MAX_RESPONSE = 8 * 1024 * 1024
@@ -295,6 +296,34 @@ def _standardize_dse(table: pd.DataFrame, ticker: str) -> pd.DataFrame:
     return out.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
 
+def _modern_dse_history(html: str, ticker: str, start: date, end: date) -> pd.DataFrame:
+    """Read the official current DSE company page's server-rendered price series."""
+    match = re.search(r'\\"series\\":(\[.*?\]),\\"suggestedCode\\"', html, re.S)
+    if not match:
+        raise ValueError("DSE's current company page did not include a readable price series.")
+    try:
+        payload = json.loads(json.loads(f'"{match.group(1)}"'))
+        raw = pd.DataFrame(payload)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("DSE's current company page returned an unreadable price series.") from exc
+    required = {"date", "price", "open", "high", "low", "trades", "volume"}
+    if raw.empty or not required.issubset(raw.columns):
+        raise ValueError("DSE's current company page did not include the expected price fields.")
+    out = raw.rename(columns={"date": "Date", "price": "Close", "open": "Open",
+                              "high": "High", "low": "Low", "trades": "Trades",
+                              "volume": "Volume"})
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Ticker"] = ticker
+    out["LTP"] = out["Close"]
+    out["Previous Close"] = out["Close"].shift(1)
+    out["Value (mn)"] = pd.NA
+    columns = ["Date", "Ticker", "Open", "High", "Low", "Close", "LTP",
+               "Previous Close", "Trades", "Value (mn)", "Volume"]
+    out = out[columns].dropna(subset=["Date"])
+    mask = out["Date"].dt.date.between(start, end)
+    return out.loc[mask].sort_values("Date").reset_index(drop=True)
+
+
 def _standardize_cse(table: pd.DataFrame, ticker: str) -> pd.DataFrame:
     table.columns = [str(c).strip().upper() for c in table.columns]
     required = {"DATE", "CODE", "CLOSE PRICE", "VOLUME"}
@@ -314,14 +343,29 @@ def price_history(exchange: str, ticker: str, start: date, end: date) -> tuple[p
     exchange, ticker = exchange.upper(), _ticker(ticker)
     start_text, end_text = _dates(start, end)
     if exchange == "DSE":
-        url = f"{DSE}/day_end_archive.php"
-        params = {"startDate": start_text, "endDate": end_text, "inst": ticker, "archive": "data"}
-        response = _request("GET", url, params=params)
-        candidates = [t for t in _tables(response.text) if {"DATE", "TRADING CODE", "CLOSEP*", "VOLUME"}.issubset({str(c).strip().upper() for c in t.columns})]
-        if not candidates:
-            raise ValueError("DSE returned no matching price table for this ticker and period.")
-        frame = _standardize_dse(candidates[-1], ticker)
-        source = response.url
+        current_url = f"{DSE_CURRENT}/company/{ticker}"
+        current_error = None
+        try:
+            current = _request("GET", current_url)
+            frame = _modern_dse_history(current.text, ticker, start, end)
+            source = current.url
+        except ValueError as exc:
+            current_error = exc
+            frame = pd.DataFrame()
+        if frame.empty:
+            url = f"{DSE}/day_end_archive.php"
+            params = {"startDate": start_text, "endDate": end_text, "inst": ticker, "archive": "data"}
+            try:
+                response = _request("GET", url, params=params)
+                candidates = [t for t in _tables(response.text) if {"DATE", "TRADING CODE", "CLOSEP*", "VOLUME"}.issubset({str(c).strip().upper() for c in t.columns})]
+                if not candidates:
+                    raise ValueError("DSE returned no matching price table for this ticker and period.")
+                frame = _standardize_dse(candidates[-1], ticker)
+                source = response.url
+            except ValueError:
+                if current_error:
+                    raise current_error
+                raise
     elif exchange == "CSE":
         url = f"{CSE}/market/marketprice"
         session = requests.Session()

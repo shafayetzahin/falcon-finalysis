@@ -198,7 +198,12 @@ if (isinstance(history, pd.DataFrame) and not history.empty
     cols[3].metric('Data freshness', freshness,
                    'Just fetched' if age_minutes is not None and age_minutes == 0 else
                    (f'{age_minutes} minutes old' if age_minutes is not None else 'No timestamp'))
-    st.caption(f"Source: {st.session_state.get('market_source', 'Not recorded')} · retrieved {fetched_text or 'time unavailable'}")
+    market_source = st.session_state.get('market_source', 'Not recorded')
+    st.caption(f"Source: {market_source} · retrieved {fetched_text or 'time unavailable'}")
+    if ('dse.com.bd/company/' in market_source
+            and shown['Date'].min().date() > start):
+        st.warning(f"DSE's current public company page supplied records from {shown['Date'].min():%Y-%m-%d}. "
+                   'Earlier dates in the selected period were unavailable from that page; use the exchange download fallback if needed.')
     if duplicate_rows or missing_close:
         st.warning(f'Data review: {duplicate_rows} duplicate date row(s) and {missing_close} missing close value(s).')
     else:
