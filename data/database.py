@@ -63,6 +63,20 @@ class Repository:
         self.path = path
         connect(path).close()
 
+    def backup_bytes(self) -> bytes:
+        """Take a consistent SQLite snapshot, including committed journal contents."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / 'backup.db'
+            source = sqlite3.connect(self.path)
+            destination = sqlite3.connect(target)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+                source.close()
+            return target.read_bytes()
+
     def list_projects(self) -> list[dict]:
         with connect(self.path) as con:
             return [dict(r) for r in con.execute('SELECT p.*, c.company_name FROM Projects p '

@@ -8,11 +8,37 @@ from core.validation import validate
 from data.parsers import read_file, suggest_mapping, prepare
 from data.document_import import extract_pdfs, extract_workbook, apply_scale
 from data.database import stamp
+from data.recovery import project_recovery, read_recovery
 from data.provenance import (PROVENANCE_COLUMNS, provenance_for_frame,
                              provenance_from_evidence, merge_provenance, changed_provenance)
 
 header('Projects & Data', 'Create a company, import values, review data quality and save your analysis locally.')
 repo = repository()
+with st.expander('Project recovery — download or restore'):
+    st.caption('Recovery files include financial inputs, company details and source references. '
+               'They exclude portfolios, credit cases, saved scenarios and original documents. '
+               'Files are not encrypted; keep them in a private location.')
+    if 'frame' in st.session_state:
+        try:
+            recovery = project_recovery(st.session_state.get('meta', {}), st.session_state.frame,
+                                        st.session_state.get('project_name', 'Financial analysis'),
+                                        st.session_state.get('provenance'))
+            st.download_button('Download project recovery file', recovery,
+                               'Falcon_Finalysis_project.json', mime='application/json')
+        except ValueError:
+            st.info('Complete valid company setup and fiscal years to download a recovery file.')
+    uploaded_recovery = st.file_uploader('Restore a project recovery file', type=['json'])
+    if uploaded_recovery:
+        try:
+            recovered_meta, recovered_frame, recovered_name, recovered_sources = read_recovery(
+                uploaded_recovery.getvalue())
+            st.write(f"{recovered_name} · {recovered_meta['company_name']} · {len(recovered_frame)} fiscal years")
+            if st.button('Restore as a new saved project'):
+                restored_id = repo.save(recovered_meta, recovered_frame, recovered_name + ' (restored)',
+                                        provenance=recovered_sources)
+                st.success(f'Restored as a separate project (#{restored_id}). Open it from Saved projects below.')
+        except ValueError as exc:
+            st.error(str(exc))
 st.subheader('Choose the easiest starting point')
 start_cols = st.columns(4)
 with start_cols[0]:

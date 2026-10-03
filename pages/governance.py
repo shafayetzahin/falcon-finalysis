@@ -11,7 +11,7 @@ header("Local Governance", "Record local operating settings, inspect the audit t
 repo = repository()
 saved = repo.settings()
 
-st.warning("This prototype does not provide user authentication or encryption at rest. Public hosted mode uses a temporary session-isolated database. Do not upload confidential or personal records; complete security, privacy and legal review before institutional use.")
+st.warning("Managed sign-in and account storage require administrator configuration. Without them, public hosted mode uses a temporary session database. Encryption at rest and automatic backups must be provided by the host before confidential records are used.")
 
 with st.form("local_governance"):
     organization = st.text_input("Organization or pilot name", saved.get("organization", ""))
@@ -49,7 +49,7 @@ else:
 
 database_path = Path(repo.path)
 if database_path.exists():
-    st.download_button("Download encrypted-storage-ready database backup", database_path.read_bytes(),
+    st.download_button("Download workspace database backup", repo.backup_bytes(),
                        file_name="Falcon_Finalysis_local_backup.db",
                        mime="application/octet-stream", width="stretch")
     st.caption("The downloaded SQLite backup is not encrypted by Falcon Finalysis. Store it only in an approved encrypted location.")

@@ -25,6 +25,10 @@ def cached_analysis(frame: pd.DataFrame, tolerance: float):
 
 def repository() -> Repository:
     import os
+    from core.accounts import accounts_enabled, account_path
+    if accounts_enabled():
+        path = account_path(os.environ.get('FALCON_FINALYSIS_DATA_DIR', ''), st.user.to_dict())
+        return Repository(path)
     if hosted_mode():
         import tempfile
         from uuid import uuid4
@@ -34,6 +38,15 @@ def repository() -> Repository:
         return Repository(Path(st.session_state['_hosted_db_path']))
     path = os.environ.get('FALCON_FINALYSIS_DB') or os.environ.get('FINSIGHT_DB')
     return Repository(Path(path)) if path else Repository()
+
+
+def storage_notice() -> str:
+    from core.accounts import accounts_enabled
+    if accounts_enabled():
+        return 'Saved work belongs to your signed-in account. Download recovery copies regularly.'
+    if hosted_mode():
+        return 'Temporary session: download a project recovery file before closing; server restarts can erase saved work.'
+    return 'Saved work is stored on this device. Download recovery copies regularly.'
 
 
 def require_analysis():

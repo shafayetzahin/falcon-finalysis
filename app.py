@@ -4,7 +4,8 @@ import logging
 import streamlit as st
 from data.demo import demo_company, DEMO_META
 from data.provenance import provenance_for_frame
-from components.ui import hosted_mode, repository
+from components.ui import hosted_mode, repository, storage_notice
+from components.accounts import require_account
 from core.i18n import nav_label, workflow_guide
 
 ROOT = Path(__file__).resolve().parent
@@ -13,6 +14,7 @@ HOSTED_MODE = hosted_mode()
 logging.basicConfig(filename=ROOT/'falcon_finalysis.log', level=logging.WARNING,
                     format='%(asctime)s %(levelname)s %(message)s')
 st.set_page_config(page_title='Falcon Finalysis | Financial Analytics', page_icon='◈', layout='wide')
+require_account()
 st.markdown((ROOT/'assets/styles.css').read_text(), unsafe_allow_html=True)
 
 
@@ -83,7 +85,7 @@ with st.sidebar:
                                                st.session_state.get('provenance'))
                 st.session_state.project_id = project_id
                 st.session_state.meta['updated_at'] = repository().open(project_id)[0]['updated_at']
-                st.success('Saved in this private browser session.' if HOSTED_MODE else 'Saved on this device.')
+                st.success('Project saved. ' + storage_notice())
             except Exception:
                 logging.exception('Saving project failed')
                 st.error('Could not save. Check that the project folder is writable and the inputs are valid.')
@@ -91,8 +93,7 @@ with st.sidebar:
     st.toggle('Dark workspace', key='dark')
     st.selectbox('BDT display units', ['Automatic', 'Lakh', 'Crore'], key='number_scale',
                  help='Changes how BDT amounts are displayed. Stored values and calculations remain in full units.')
-    st.caption('Hosted mode: saved work is isolated to this temporary browser session.'
-               if HOSTED_MODE else 'Your financial data remains on your device.')
+    st.caption(storage_notice())
 
 if st.session_state.get('dark'):
     st.markdown('''<style>
