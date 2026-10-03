@@ -539,6 +539,8 @@ def read_price_file(payload: bytes, filename: str, ticker: str = "") -> pd.DataF
         raise
     except Exception as exc:
         raise ValueError("Unable to read this price-history file.") from exc
+    if len(frame) > 5000:
+        raise ValueError("Use at most 5,000 price rows per upload. Split the file into smaller periods.")
     aliases = {
         "date": "Date", "tradingcode": "Ticker", "tradecode": "Ticker", "code": "Ticker",
         "open": "Open", "openp": "Open", "high": "High", "low": "Low", "close": "Close",
@@ -549,14 +551,32 @@ def read_price_file(payload: bytes, filename: str, ticker: str = "") -> pd.DataF
     frame = frame.rename(columns={c: aliases.get(re.sub(r"[^a-z0-9]", "", str(c).lower()), str(c)) for c in frame.columns})
     if not {"Date", "Close", "Volume"}.issubset(frame.columns):
         raise ValueError("The file needs Date, Close and Volume columns. Ticker/Code is recommended.")
-    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
+    if frame.columns.duplicated().any():
+        raise ValueError("Multiple columns map to the same price field. Keep one column per field.")
+    # Slash dates follow the site's DD/MM/YYYY convention; ISO dates remain unambiguous.
+    frame["Date"] = frame["Date"].map(
+        lambda value: pd.to_datetime(value, errors="coerce", dayfirst="/" in str(value)))
     if "Ticker" not in frame:
         if not ticker:
             raise ValueError("Enter a ticker because the uploaded file has no Ticker/Code column.")
         frame["Ticker"] = _ticker(ticker)
+    frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
+    if ticker:
+        frame = frame.loc[frame["Ticker"] == _ticker(ticker)].copy()
+        if frame.empty:
+            raise ValueError(f"The file contains no rows for {_ticker(ticker)}. Check the selected ticker.")
+    elif frame["Ticker"].nunique() != 1:
+        raise ValueError("Choose a ticker before uploading a file containing multiple companies.")
     for col in frame.columns.difference(["Date", "Ticker", "Company"]):
         frame[col] = _number(frame[col])
-    frame = frame.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
+    if frame[["Date", "Close", "Volume"]].isna().any().any():
+        raise ValueError("Every price row needs a valid Date, Close and Volume. Correct the missing or invalid values.")
+    if ((frame["Close"] <= 0) | (frame["Volume"] < 0)
+            | frame[["Close", "Volume"]].isin([float('inf'), float('-inf')]).any(axis=1)).any():
+        raise ValueError("Closing prices must be positive and volume non-negative; infinite values are invalid.")
+    if frame.duplicated(["Ticker", "Date"]).any():
+        raise ValueError("Duplicate trading dates were found for this ticker. Resolve them before uploading.")
+    frame = frame.sort_values("Date").reset_index(drop=True)
     if frame.empty:
         raise ValueError("No usable dated closing prices were found.")
     return frame

@@ -103,6 +103,23 @@ def test_all_pages(app, page):
     assert not app.error, [e.value for e in app.error]
 
 
+def test_market_changed_period_warns_and_invalid_period_disables_fetch(app):
+    app.switch_page('pages/market.py').run()
+    app.session_state['market_history'] = pd.DataFrame({
+        'Date': pd.to_datetime(['2025-01-01']), 'Ticker': ['SQURPHARMA'],
+        'Close': [100.0], 'Volume': [10.0]})
+    app.session_state['market_history_key'] = ('DSE', 'SQURPHARMA')
+    app.session_state['market_history_period'] = (date(2025, 1, 1), date(2025, 1, 2))
+    app.run()
+    assert not app.exception
+    assert any('previous result' in warning.value for warning in app.warning)
+    next(d for d in app.date_input if d.label == 'To').set_value(date(2024, 1, 1))
+    next(d for d in app.date_input if d.label == 'From').set_value(date(2025, 1, 1))
+    app.run()
+    assert not app.exception
+    assert next(b for b in app.button if b.label == 'Fetch official price history').disabled
+
+
 def test_demo_save_scenario_and_reports(app):
     next(b for b in app.button if b.label == 'Save project').click().run()
     assert app.session_state['project_id']

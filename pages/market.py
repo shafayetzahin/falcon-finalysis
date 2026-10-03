@@ -38,7 +38,8 @@ def cached_snapshot(exchange: str, ticker: str):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_history(exchange: str, ticker: str, start: date, end: date):
-    return price_history(exchange, ticker, start, end)
+    history, source = price_history(exchange, ticker, start, end)
+    return history, source, datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -93,6 +94,7 @@ st.markdown('**Step 1 · Select and confirm the company**')
 list_col, detail_col = st.columns(2)
 if list_col.button('Refresh ticker suggestions', width='stretch'):
     try:
+        cached_tickers.clear(exchange)
         current_catalog = st.session_state[options_key]
         refreshed_catalog = cached_tickers(exchange)
         st.session_state[options_key] = {
@@ -153,18 +155,24 @@ today = date.today()
 d1, d2 = st.columns(2)
 start = d1.date_input('From', today - timedelta(days=90), max_value=today, format='DD/MM/YYYY')
 end = d2.date_input('To', today, max_value=today, format='DD/MM/YYYY')
-if st.button('Fetch official price history', type='primary'):
+valid_period = start <= end and (end - start).days <= 731
+if not valid_period:
+    st.warning('Choose a From date on or before To, with a period of two years or less.')
+if st.button('Fetch official price history', type='primary', disabled=not ticker or not valid_period):
     try:
-        history, source = cached_history(exchange, ticker, start, end)
+        history, source, fetched_at = cached_history(exchange, ticker, start, end)
         st.session_state.market_history = history
         st.session_state.market_source = source
-        st.session_state.market_fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        st.session_state.market_fetched_at = fetched_at
         st.session_state.market_history_key = (exchange, ticker)
+        st.session_state.market_history_period = (start, end)
     except ValueError as exc:
         st.error(str(exc))
+        if st.session_state.get('market_history_key') == (exchange, ticker):
+            st.info('The fetch failed. Your previous price result is retained below; check its retrieval time and displayed period.')
 
 with st.expander('Exchange download fallback'):
-    st.write('If the exchange blocks live access, download its historical table as CSV/XLSX and upload it here. Required columns: Date, Close and Volume.')
+    st.write('If the exchange blocks live access, download its historical table as CSV/XLSX and upload it here. Required columns: Date, Close and Volume. Use DD/MM/YYYY or YYYY-MM-DD dates. Files with multiple companies are filtered to the selected ticker.')
     uploaded = st.file_uploader('Price-history file', type=['csv', 'xlsx'], key='market_file')
     if uploaded and st.button('Use uploaded price history'):
         try:
@@ -172,6 +180,7 @@ with st.expander('Exchange download fallback'):
             st.session_state.market_source = f'User upload: {uploaded.name}'
             st.session_state.market_fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             st.session_state.market_history_key = (exchange, ticker)
+            st.session_state.market_history_period = None
         except ValueError as exc:
             st.error(str(exc))
 
@@ -179,6 +188,12 @@ history = st.session_state.get('market_history')
 if (isinstance(history, pd.DataFrame) and not history.empty
         and st.session_state.get('market_history_key') == (exchange, ticker)):
     shown = history.copy().sort_values('Date')
+    loaded_period = st.session_state.get('market_history_period')
+    if loaded_period and loaded_period != (start, end):
+        st.warning(f'The dates changed. Showing the previous result requested for '
+                   f'{loaded_period[0]:%d/%m/%Y}–{loaded_period[1]:%d/%m/%Y}. '
+                   'Fetch again to update the chart and workbook.')
+    st.caption(f'Displayed records: {shown.Date.min():%d/%m/%Y}–{shown.Date.max():%d/%m/%Y}.')
     fetched_text = st.session_state.get('market_fetched_at', '')
     try:
         fetched_time = datetime.fromisoformat(fetched_text.replace('Z', '+00:00'))
@@ -202,7 +217,8 @@ if (isinstance(history, pd.DataFrame) and not history.empty
                    (f'{age_minutes} minutes old' if age_minutes is not None else 'No timestamp'))
     market_source = st.session_state.get('market_source', 'Not recorded')
     st.caption(f"Source: {market_source} · retrieved {fetched_display}")
-    unavailable_days = (shown['Date'].min().date() - start).days
+    requested_start = loaded_period[0] if loaded_period else start
+    unavailable_days = (shown['Date'].min().date() - requested_start).days
     if ('dse.com.bd/company/' in market_source and unavailable_days > 7):
         st.warning(f"DSE's current public company page supplied records from {shown['Date'].min():%d/%m/%Y}. "
                    'Earlier dates in the selected period were unavailable from that page; use the exchange download fallback if needed.')
