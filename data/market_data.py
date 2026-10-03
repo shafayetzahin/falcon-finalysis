@@ -188,10 +188,97 @@ def _pairs(tables: list[pd.DataFrame]) -> dict[str, str]:
     return fields
 
 
+def _modern_dse_company(html: str) -> dict:
+    """Decode the official current DSE page's server-rendered company object."""
+    match = re.search(r'\\"company\\":(\{.*?\}),\\"series\\":', html, re.S)
+    if not match:
+        raise ValueError("DSE's current company page did not include readable company details.")
+    try:
+        company = json.loads(json.loads(f'"{match.group(1)}"'))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("DSE's current company page returned unreadable company details.") from exc
+    if not isinstance(company, dict) or not company.get("code") or not company.get("name"):
+        raise ValueError("DSE's current company page did not include the expected company fields.")
+    return company
+
+
+def _display_number(value: object, scale: float = 1.0) -> str:
+    if value is None or value == "$undefined":
+        return ""
+    try:
+        number = float(value) / scale
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.2f}"
+
+
+def _display_date(value: object, include_time: bool = False) -> str:
+    text = str(value or "").strip()
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            parsed = datetime.strptime(text, pattern)
+            return parsed.strftime("%d/%m/%Y %H:%M:%S" if include_time and "%H" in pattern
+                                   else "%d/%m/%Y")
+        except ValueError:
+            continue
+    return text
+
+
+def _modern_dse_fields(company: dict) -> dict[str, str]:
+    """Present current DSE values with explicit units and without invented values."""
+    fields = {
+        "Company Name": str(company.get("name", "")),
+        "Trading Code": str(company.get("code", "")),
+        "Sector": str(company.get("sector", "")),
+        "Board": str(company.get("board", "")),
+        "Category": str(company.get("category", "")),
+        "Instrument Type": str(company.get("instrumentType", "")),
+        "Listing Year": str(company.get("listingYear", "")),
+        "Operational Status": str(company.get("operationalStatus", "")),
+        "Scrip Code": str(company.get("scripCode", "")),
+        "Last Price (BDT)": _display_number(company.get("price")),
+        "Previous Close (BDT)": _display_number(company.get("prevClose")),
+        "Open (BDT)": _display_number(company.get("open")),
+        "High (BDT)": _display_number(company.get("high")),
+        "Low (BDT)": _display_number(company.get("low")),
+        "Volume": _display_number(company.get("volume")),
+        "Trades": _display_number(company.get("trades")),
+        "Market Capitalization (BDT mn)": _display_number(company.get("marketCap"), 1_000_000),
+        "P/E": _display_number(company.get("pe")),
+        "EPS (BDT/share)": _display_number(company.get("eps")),
+        "Dividend Yield (%)": _display_number(company.get("dividendYield")),
+        "NAV per Share (BDT)": _display_number(company.get("nav")),
+        "52-week High (BDT)": _display_number(company.get("weekHigh52")),
+        "52-week Low (BDT)": _display_number(company.get("weekLow52")),
+        "Face Value (BDT)": _display_number(company.get("faceValue")),
+        "Paid-up Capital (BDT mn)": _display_number(company.get("paidUpCapital"), 1_000_000),
+        "Authorized Capital (BDT mn)": _display_number(company.get("authorizedCapital")),
+        "Free Float (%)": _display_number(company.get("freeFloat")),
+        "Market Lot": _display_number(company.get("marketLot")),
+        "Financial Year End": str(company.get("yearEnd", "")),
+        "AGM Date": _display_date(company.get("agmDate")),
+        "Last Price Update": _display_date(company.get("lastPriceUpdate"), include_time=True),
+        "Data As of": _display_date(company.get("asOfDate")),
+        "Registered Office": str(company.get("registeredOffice", "")),
+        "Website": str(company.get("website", "")),
+        "Email": str(company.get("email", "")),
+    }
+    return {key: value for key, value in fields.items()
+            if value and value not in {"None", "$undefined"}}
+
+
 def company_snapshot(exchange: str, ticker: str) -> CompanySnapshot:
     exchange, ticker = exchange.upper(), _ticker(ticker)
     if exchange == "DSE":
-        url = f"{DSE}/displayCompany.php?name={ticker}"
+        current_url = f"{DSE_CURRENT}/company/{ticker}"
+        try:
+            response = _request("GET", current_url)
+            company = _modern_dse_company(response.text)
+            fields = _modern_dse_fields(company)
+            return CompanySnapshot(exchange, ticker, str(company["name"]), fields, response.url,
+                                   datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        except ValueError:
+            url = f"{DSE}/displayCompany.php?name={ticker}"
     elif exchange == "CSE":
         url = f"{CSE}/company/companydetails/{ticker}"
     else:
@@ -262,10 +349,57 @@ def _annual_metrics(tables: list[pd.DataFrame], source: str) -> tuple[pd.DataFra
     return frame, details
 
 
+def _modern_dse_annual_metrics(company: dict, source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert directly reported current-site annual metrics to the existing review table."""
+    observations: list[dict] = []
+    dividends = {int(item["year"]): item for item in company.get("dividendHistory", [])
+                 if isinstance(item, dict) and _year(item.get("year"))}
+    for item in company.get("multiYearFinancials", []):
+        if not isinstance(item, dict) or not (year := _year(item.get("year"))):
+            continue
+        metrics = [
+            ("Net Income", "BDT million", item.get("profitForYear", item.get("profit"))),
+            ("Basic EPS", "BDT/share", item.get("epsContBasicOriginal", item.get("epsBasic"))),
+            ("NAV per Share", "BDT/share", item.get("navOriginal", item.get("nav"))),
+        ]
+        dividend = dividends.get(year)
+        if dividend:
+            cash, stock = dividend.get("cash"), dividend.get("stock")
+            if cash is not None or stock is not None:
+                metrics.append(("Dividend", "%", float(cash or 0) + float(stock or 0)))
+            metrics.append(("Dividend Yield", "%", dividend.get("yieldPct")))
+        for metric, unit, value in metrics:
+            if value is not None and value != "$undefined":
+                observations.append({"Year": year, "Exchange metric": metric,
+                                     "Value": float(value), "Unit": unit, "Source": source})
+    if not observations:
+        raise ValueError("DSE's current company page did not include readable annual financial metrics.")
+    details = (pd.DataFrame(observations).drop_duplicates(["Year", "Exchange metric"])
+               .sort_values(["Year", "Exchange metric"]).reset_index(drop=True))
+    records = []
+    for year in sorted(details.Year.unique()):
+        row = {"Year": int(year)}
+        profit = details[(details.Year == year) & (details["Exchange metric"] == "Net Income")]
+        if not profit.empty:
+            row["Net Income"] = float(profit.iloc[0].Value) * 1_000_000
+        records.append(row)
+    return pd.DataFrame(records).reindex(columns=["Year"] + FIELDS), details
+
+
 def exchange_financials(exchange: str, ticker: str) -> ExchangeFinancials:
     exchange, ticker = exchange.upper(), _ticker(ticker)
-    url = (f"{DSE}/displayCompany.php?name={ticker}" if exchange == "DSE"
-           else f"{CSE}/company/companydetails/{ticker}" if exchange == "CSE" else "")
+    if exchange == "DSE":
+        current_url = f"{DSE_CURRENT}/company/{ticker}"
+        try:
+            response = _request("GET", current_url)
+            frame, details = _modern_dse_annual_metrics(
+                _modern_dse_company(response.text), response.url)
+            return ExchangeFinancials(frame.tail(10).reset_index(drop=True), details, response.url,
+                                      datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        except ValueError:
+            url = f"{DSE}/displayCompany.php?name={ticker}"
+    else:
+        url = f"{CSE}/company/companydetails/{ticker}" if exchange == "CSE" else ""
     if not url:
         raise ValueError("Exchange must be DSE or CSE.")
     response = _request("GET", url)

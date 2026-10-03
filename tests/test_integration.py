@@ -2,6 +2,7 @@
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+import json
 import ssl
 import pytest
 import pandas as pd
@@ -15,7 +16,9 @@ from reports.pdf_report import pdf_report
 from data.document_import import extract_workbook, extract_pdfs, apply_scale
 from data.market_data import (_annual_metrics, _standardize_dse, read_price_file,
                               ticker_list, bundled_ticker_list, bundled_ticker_catalog,
-                              price_history, _verified_exchange_session, _modern_dse_history)
+                              price_history, _verified_exchange_session, _modern_dse_history,
+                              _modern_dse_company, _modern_dse_fields,
+                              _modern_dse_annual_metrics)
 
 
 def test_ticker_suggestions_support_cse_suffixes_and_bundled_fallback(monkeypatch):
@@ -284,6 +287,32 @@ def test_current_dse_company_page_history_is_read_without_estimated_value():
     assert frame.Close.tolist() == [213.5]
     assert frame.Ticker.tolist() == ['SQURPHARMA']
     assert frame['Value (mn)'].isna().all()
+
+
+def test_current_dse_company_page_supplies_details_and_annual_metrics():
+    company = {
+        'code': 'TESTCO', 'name': 'Test Company PLC.', 'sector': 'Consumer',
+        'marketCap': 123_000_000, 'price': 45.5, 'agmDate': '15-12-2025',
+        'lastPriceUpdate': '2026-10-01 14:09:04',
+        'multiYearFinancials': [
+            {'year': 2024, 'profitForYear': 120.5, 'epsContBasicOriginal': 3.2,
+             'navOriginal': 18.4},
+            {'year': 2025, 'profitForYear': 140.0, 'epsContBasicOriginal': 3.8,
+             'navOriginal': 20.1},
+        ],
+        'dividendHistory': [{'year': 2025, 'cash': 20, 'stock': 5, 'yieldPct': 4.2}],
+    }
+    encoded = json.dumps(company, separators=(',', ':')).replace('"', r'\"')
+    html = r'\"company\":' + encoded + r',\"series\":[]'
+    parsed = _modern_dse_company(html)
+    fields = _modern_dse_fields(parsed)
+    frame, details = _modern_dse_annual_metrics(parsed, 'https://www.dse.com.bd/company/TESTCO')
+    assert fields['Company Name'] == 'Test Company PLC.'
+    assert fields['AGM Date'] == '15/12/2025'
+    assert fields['Market Capitalization (BDT mn)'] == '123.00'
+    assert frame.loc[frame.Year.eq(2025), 'Net Income'].iloc[0] == 140_000_000
+    dividend = details[(details.Year == 2025) & details['Exchange metric'].eq('Dividend')]
+    assert dividend.Value.iloc[0] == 25
 
 
 def test_exchange_tls_sessions_are_host_scoped_and_verified():
