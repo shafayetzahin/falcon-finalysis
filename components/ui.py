@@ -50,6 +50,8 @@ def storage_notice() -> str:
 
 
 def require_analysis():
+    from components.accounts import require_account
+    require_account(show_controls=False)
     if 'frame' not in st.session_state:
         st.info('Load Demo Company from the sidebar, or create a company in Projects & Data.')
         st.stop()
@@ -57,6 +59,8 @@ def require_analysis():
 
 
 def header(title: str, subtitle: str) -> None:
+    from components.accounts import require_account
+    require_account(show_controls=False)
     st.caption('FALCON FINALYSIS  /  FINANCIAL ANALYTICS & DECISION SUPPORT')
     st.title(title)
     st.caption(subtitle)

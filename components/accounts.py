@@ -4,7 +4,7 @@ import streamlit as st
 from core.accounts import accounts_enabled, account_path
 
 
-def require_account() -> None:
+def require_account(show_controls: bool = True) -> None:
     if not accounts_enabled():
         return
     if not os.environ.get('FALCON_FINALYSIS_DATA_DIR'):
@@ -36,9 +36,10 @@ def require_account() -> None:
     if st.session_state.get('_account_identity') != str(path):
         st.session_state.clear()
         st.session_state['_account_identity'] = str(path)
-    with st.sidebar:
-        st.caption('Private account workspace')
-        if st.button('Sign out'):
-            st.session_state.clear()
-            st.logout()
-            st.stop()
+    if show_controls:
+        with st.sidebar:
+            st.caption('Private account workspace')
+            if st.button('Sign out'):
+                st.session_state.clear()
+                st.logout()
+                st.stop()

@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 import pytest
 import pandas as pd
+import reports  # noqa: F401 -- preload package before AppTest inserts pages/ on sys.path
 from streamlit.testing.v1 import AppTest
 from core.accounts import account_path
 from data.database import Repository
@@ -32,10 +33,11 @@ def test_invalid_accounts_cannot_resolve_storage(tmp_path, change):
                      now=100)
 
 
-def test_account_mode_without_storage_stops_before_workspace(monkeypatch):
+@pytest.mark.parametrize('entry', ['app.py', 'pages/market.py', 'pages/projects.py'])
+def test_account_mode_without_storage_stops_before_workspace(monkeypatch, entry):
     monkeypatch.setenv('FALCON_FINALYSIS_ACCOUNTS', 'true')
     monkeypatch.delenv('FALCON_FINALYSIS_DATA_DIR', raising=False)
-    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run()
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / entry)).run()
     assert not app.exception
     assert any('storage is not configured' in error.value for error in app.error)
     assert not app.button
