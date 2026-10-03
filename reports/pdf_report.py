@@ -111,7 +111,7 @@ def pdf_report(a, meta: dict, scenario: dict | None = None,
               Spacer(1, 42), p(meta['company_name'], 'SectionTitle'),
               p(f'FY{a.statements.index.min()} - FY{a.statements.index.max()} | {meta["currency"]} | {meta.get("industry", "")}'),
               p('Financial analysis report', 'SectionTitle'),
-              p('Generated '+datetime.now(timezone.utc).strftime('%d %B %Y, %H:%M UTC'), 'SmallFS'),
+              p('Generated '+datetime.now(timezone.utc).strftime('%d/%m/%Y, %H:%M UTC'), 'SmallFS'),
               Spacer(1, 36), p('From Financial Data to Financial Insight'),
               p('Local, deterministic analysis. This report is a snapshot of the supplied data and assumptions.', 'SmallFS'),
               p(DISCLAIMER, 'SmallFS')]

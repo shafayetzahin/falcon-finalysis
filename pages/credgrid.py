@@ -103,7 +103,7 @@ th{{background:#e9f5f4}}.notice{{background:#fff3cd;padding:14px;border-left:5px
 <h2>Cash-flow profile</h2><p><strong>{score}</strong> · {escape(analysis.band)} · confidence {analysis.confidence:.0%}</p>
 {analysis.components.to_html(index=False, border=0, float_format=lambda value: f'{value:,.4f}')}
 <h2>Reason codes</h2><ul>{reasons}</ul><h2>Modeled proposal</h2><table>{proposal}</table>
-<p>Benchmark source: {escape(benchmark_source)} · as of {benchmark_date.isoformat()}</p>
+<p>Benchmark source: {escape(benchmark_source)} · as of {benchmark_date:%d/%m/%Y}</p>
 <p>The proposal is not approval, a credit bureau score, or a probability of default. It excludes legal and regulatory eligibility checks.</p>
 </body></html>'''
     return html.encode("utf-8")
@@ -190,7 +190,7 @@ if st.button("Suggest transaction categories"):
     st.rerun()
 reviewed_transactions = st.data_editor(
     transactions, num_rows="dynamic", hide_index=True, width="stretch", key="cg_transaction_editor",
-    column_config={"Date": st.column_config.DateColumn(required=True),
+    column_config={"Date": st.column_config.DateColumn(required=True, format="DD/MM/YYYY"),
                    "Amount": st.column_config.NumberColumn("Signed amount (BDT)", required=True),
                    "Balance": st.column_config.NumberColumn("Running balance (BDT)"),
                    "Category": st.column_config.TextColumn("Reviewed category"),
@@ -217,7 +217,7 @@ benchmark_cols = st.columns(2)
 benchmark_source = benchmark_cols[0].text_input("Risk-free source / instrument", key="cg_rate_source",
                                                 placeholder="Reviewed source and tenor")
 benchmark_date = benchmark_cols[1].date_input("Benchmark as-of date", max_value=date.today(),
-                                              key="cg_rate_date")
+                                              key="cg_rate_date", format="DD/MM/YYYY")
 reviewed_expenses = st.number_input(
     "Reviewed average monthly operating expenses (BDT; zero uses statement-derived outflows)",
     min_value=0.0, step=1_000.0, key="cg_reviewed_expenses")

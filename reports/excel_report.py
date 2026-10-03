@@ -27,6 +27,10 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     data['Date'] = pd.to_datetime(data['Date'])
     close = pd.to_numeric(data['Close'], errors='coerce')
     data['Daily Return'] = close.pct_change(fill_method=None)
+    try:
+        fetched_display = pd.Timestamp(fetched_at).strftime('%d/%m/%Y %H:%M UTC')
+    except (TypeError, ValueError):
+        fetched_display = fetched_at
     monthly = (data.set_index('Date').resample('ME')
                .agg(Close=('Close', 'last'), Average_Close=('Close', 'mean'),
                     Trading_Days=('Close', 'count'), Volume=('Volume', 'sum'))
@@ -37,7 +41,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     summary.title = 'Summary'
     summary.sheet_view.showGridLines = False
     summary.append([f'{exchange} market history - {ticker}'])
-    summary.append(['Period', f'{data.Date.min():%d %b %Y} to {data.Date.max():%d %b %Y}'])
+    summary.append(['Period', f'{data.Date.min():%d/%m/%Y} to {data.Date.max():%d/%m/%Y}'])
     summary.append(['Trading records', len(data)])
     summary.append(['First close', float(close.iloc[0])])
     summary.append(['Last close', float(close.iloc[-1])])
@@ -46,7 +50,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     summary.append([])
     summary.append(['Use', 'Official exchange values arranged for filtering, charting and further analysis.'])
     summary.append(['Source', source_url])
-    summary.append(['Fetched at (UTC)', fetched_at])
+    summary.append(['Fetched at (UTC)', fetched_display])
     summary.append(['Caution', 'Exchange website data may be delayed, corrected, unavailable or reformatted. Verify material decisions at the source.'])
     summary['A1'].font = Font(size=16, bold=True, color=NAVY)
     for cell in summary['A']:
@@ -70,7 +74,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
         cell.font = Font(color='FFFFFF', bold=True)
         cell.alignment = Alignment(horizontal='center')
     for cell in prices['A'][1:]:
-        cell.number_format = 'dd-mmm-yyyy'
+        cell.number_format = 'dd/mm/yyyy'
     if 'Daily Return' in headers:
         ret_col = headers.index('Daily Return') + 1
         for cell in list(prices.columns)[ret_col - 1][1:]:
@@ -108,7 +112,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     sources.append(['Exchange', exchange])
     sources.append(['Ticker', ticker])
     sources.append(['Official source', source_url])
-    sources.append(['Fetched at (UTC)', fetched_at])
+    sources.append(['Fetched at (UTC)', fetched_display])
     sources.append(['Method', 'Public exchange web page parsed by Falcon Finalysis; no price values are estimated.'])
     sources.append(['Refresh', 'Return to Listed Company Data and fetch the required date range again.'])
     for cell in sources[1]:

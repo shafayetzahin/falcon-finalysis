@@ -45,7 +45,7 @@ with st.expander("1 · Capital, market and discount-rate assumptions", expanded=
     debt_cost = rate_cols[3].number_input("Pre-tax cost of debt %", 0.0, 100.0, 12.0, .25) / 100
     tax_rate = rate_cols[4].number_input("Marginal tax rate %", 0.0, 99.0, 25.0, .5) / 100
     rate_source = st.text_input("Market assumptions source and as-of date",
-                                placeholder="Example: Bangladesh government security, reviewed market source, YYYY-MM-DD")
+                                placeholder="Example: Bangladesh government security, reviewed market source, DD/MM/YYYY")
 
 market_cap = shares * market_price
 try:

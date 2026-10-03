@@ -151,8 +151,8 @@ st.divider()
 st.subheader('Historical price period')
 today = date.today()
 d1, d2 = st.columns(2)
-start = d1.date_input('From', today - timedelta(days=90), max_value=today)
-end = d2.date_input('To', today, max_value=today)
+start = d1.date_input('From', today - timedelta(days=90), max_value=today, format='DD/MM/YYYY')
+end = d2.date_input('To', today, max_value=today, format='DD/MM/YYYY')
 if st.button('Fetch official price history', type='primary'):
     try:
         history, source = cached_history(exchange, ticker, start, end)
@@ -184,8 +184,10 @@ if (isinstance(history, pd.DataFrame) and not history.empty
         fetched_time = datetime.fromisoformat(fetched_text.replace('Z', '+00:00'))
         age_minutes = max(0, int((datetime.now(timezone.utc) - fetched_time).total_seconds() / 60))
         freshness = 'Fresh' if age_minutes <= 15 else 'Review freshness'
+        fetched_display = fetched_time.strftime('%d/%m/%Y %H:%M UTC')
     except (ValueError, TypeError):
         age_minutes, freshness = None, 'Unknown'
+        fetched_display = 'time unavailable'
     unique_dates = shown['Date'].nunique()
     duplicate_rows = int(len(shown) - unique_dates)
     missing_close = int(pd.to_numeric(shown['Close'], errors='coerce').isna().sum())
@@ -199,16 +201,18 @@ if (isinstance(history, pd.DataFrame) and not history.empty
                    'Just fetched' if age_minutes is not None and age_minutes == 0 else
                    (f'{age_minutes} minutes old' if age_minutes is not None else 'No timestamp'))
     market_source = st.session_state.get('market_source', 'Not recorded')
-    st.caption(f"Source: {market_source} · retrieved {fetched_text or 'time unavailable'}")
+    st.caption(f"Source: {market_source} · retrieved {fetched_display}")
     unavailable_days = (shown['Date'].min().date() - start).days
     if ('dse.com.bd/company/' in market_source and unavailable_days > 7):
-        st.warning(f"DSE's current public company page supplied records from {shown['Date'].min():%Y-%m-%d}. "
+        st.warning(f"DSE's current public company page supplied records from {shown['Date'].min():%d/%m/%Y}. "
                    'Earlier dates in the selected period were unavailable from that page; use the exchange download fallback if needed.')
     if duplicate_rows or missing_close:
         st.warning(f'Data review: {duplicate_rows} duplicate date row(s) and {missing_close} missing close value(s).')
     else:
         st.success('Basic market-data checks passed: unique trading dates and complete closing prices.')
-    st.dataframe(shown.sort_values('Date', ascending=False), hide_index=True, width='stretch')
+    display_history = shown.sort_values('Date', ascending=False).copy()
+    display_history['Date'] = display_history['Date'].dt.strftime('%d/%m/%Y')
+    st.dataframe(display_history, hide_index=True, width='stretch')
     try:
         workbook = market_data_workbook(shown, exchange, ticker,
                                         st.session_state.get('market_source', ''),

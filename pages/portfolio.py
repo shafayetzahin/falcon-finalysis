@@ -45,6 +45,14 @@ def frame_records(frame: pd.DataFrame) -> list[dict]:
     return json.loads(frame.to_json(orient='records', date_format='iso'))
 
 
+def display_utc(value: str) -> str:
+    """Format stored ISO timestamps for the user-facing Bangladesh date convention."""
+    try:
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).strftime('%d/%m/%Y %H:%M')
+    except (AttributeError, TypeError, ValueError):
+        return ''
+
+
 def portfolio_payload(histories: dict[str, pd.DataFrame], actions: pd.DataFrame,
                       holdings: pd.DataFrame, weights: pd.DataFrame,
                       exchange: str, frequency: str, risk_free_rate: float) -> dict:
@@ -189,8 +197,9 @@ tickers = list(dict.fromkeys(str(ticker).strip().upper() for ticker in tickers i
 today = date.today()
 period_col1, period_col2, frequency_col = st.columns(3)
 start = period_col1.date_input('From', today - timedelta(days=365), max_value=today,
-                               key='portfolio_start')
-end = period_col2.date_input('To', today, max_value=today, key='portfolio_end')
+                               key='portfolio_start', format='DD/MM/YYYY')
+end = period_col2.date_input('To', today, max_value=today, key='portfolio_end',
+                             format='DD/MM/YYYY')
 frequency = frequency_col.selectbox('Return frequency', ['Daily', 'Weekly', 'Monthly'], index=2,
                                      key='portfolio_frequency')
 
@@ -264,9 +273,9 @@ if histories:
     source_rows = [{'Ticker': ticker, 'Status': 'Fictional demo' if 'Fictional' in
                     st.session_state.get('portfolio_sources', {}).get(ticker, '') else 'Loaded — verify source',
                     'Source': st.session_state.get('portfolio_sources', {}).get(ticker, ''),
-                    'Retrieved UTC': fetched_at,
-                    'Rows': len(frame), 'From': pd.to_datetime(frame.Date).min().date(),
-                    'To': pd.to_datetime(frame.Date).max().date()}
+                    'Retrieved UTC': display_utc(fetched_at),
+                    'Rows': len(frame), 'From': pd.to_datetime(frame.Date).min().strftime('%d/%m/%Y'),
+                    'To': pd.to_datetime(frame.Date).max().strftime('%d/%m/%Y')}
                    for ticker, frame in histories.items()]
     st.dataframe(pd.DataFrame(source_rows), hide_index=True, width='stretch')
     st.caption('Source badges describe origin and retrieval time; they do not certify completeness or accuracy.')
@@ -300,7 +309,7 @@ if histories:
     actions = st.data_editor(
         st.session_state[action_key], num_rows='dynamic', hide_index=True, width='stretch',
         column_config={
-            'Date': st.column_config.DateColumn('Effective / record date'),
+            'Date': st.column_config.DateColumn('Effective / record date', format='DD/MM/YYYY'),
             'Ticker': st.column_config.SelectboxColumn('Ticker', options=available, required=True),
             'Cash Dividend per Share': st.column_config.NumberColumn('Cash dividend / share (BDT)', min_value=0.0),
             'Cash Dividend %': st.column_config.NumberColumn('Cash dividend %', min_value=0.0),
@@ -504,6 +513,7 @@ if analysis is not None:
         reviewed_actions = st.session_state.get('portfolio_actions')
         if isinstance(reviewed_actions, pd.DataFrame) and not reviewed_actions.empty:
             timeline = reviewed_actions.copy().sort_values('Date')
+            timeline['Date'] = pd.to_datetime(timeline['Date'], errors='coerce').dt.strftime('%d/%m/%Y')
             st.dataframe(timeline, hide_index=True, width='stretch')
         else:
             st.info('No corporate actions were entered for this analysis period.')
