@@ -114,3 +114,15 @@ def test_new_company_requires_fresh_valuation_confirmation(workspace):
     at.run()
     assert not next(field for field in at.checkbox if field.label.startswith('I verified shares')).value
     assert next(button for button in at.button if button.label == 'Calculate valuation range').disabled
+
+
+def test_market_missing_or_partial_volume_does_not_appear_as_a_complete_total(workspace):
+    at = workspace.switch_page('pages/market.py').run()
+    for values in ([float('nan'), float('nan')], [10., float('nan')]):
+        at.session_state['market_history'] = pd.DataFrame({
+            'Date': pd.to_datetime(['2025-01-01', '2025-01-02']),
+            'Ticker': ['SQURPHARMA'] * 2, 'Close': [100., 101.], 'Volume': values})
+        at.session_state['market_history_key'] = ('DSE', 'SQURPHARMA')
+        at.run()
+        assert next(metric for metric in at.metric if metric.label == 'Total volume').value == 'N/A'
+        assert not at.exception and not at.error

@@ -8,7 +8,7 @@ and 3.12 on Linux. The desktop verification used Python 3.12 on Windows.
 
 ## Automated coverage
 
-**237 pytest cases** cover:
+**238 pytest cases** cover:
 
 - Independent expected current/quick/cash/OCF ratios, margins, ROA/ROE,
   debt/equity vs liabilities/equity, interest coverage, turnover, operating days,

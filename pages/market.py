@@ -115,7 +115,12 @@ snapshot = st.session_state.get('company_snapshot')
 if snapshot and snapshot.exchange == exchange and snapshot.ticker == ticker:
     st.success('Company confirmed. Continue to Step 2 to collect available annual exchange figures.')
     st.subheader(snapshot.company_name)
-    st.caption(f'{snapshot.exchange}: {snapshot.ticker} · fetched {snapshot.fetched_at} · official source')
+    try:
+        snapshot_time = datetime.fromisoformat(snapshot.fetched_at.replace('Z', '+00:00'))
+        snapshot_time = snapshot_time.astimezone(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')
+    except (ValueError, TypeError):
+        snapshot_time = 'time unavailable'
+    st.caption(f'{snapshot.exchange}: {snapshot.ticker} · fetched {snapshot_time} · official source')
     details = pd.DataFrame(snapshot.fields.items(), columns=['Company detail', 'Value'])
     st.dataframe(details, hide_index=True, width='stretch', height=min(500, 36 * (len(details) + 1)))
     st.link_button(f'Open on {exchange}', snapshot.source_url)
@@ -211,7 +216,8 @@ if (isinstance(history, pd.DataFrame) and not history.empty
     cols = st.columns(4)
     cols[0].metric('Latest close', f'{latest.Close:,.2f} BDT')
     cols[1].metric('Trading records', f'{len(shown):,}')
-    cols[2].metric('Total volume', f'{shown.Volume.sum():,.0f}')
+    cols[2].metric('Total volume', f'{shown.Volume.sum():,.0f}' if shown.Volume.notna().all() else 'N/A',
+                   help='Total volume is available only when every displayed trading record has reported volume.')
     cols[3].metric('Data freshness', freshness,
                    'Just fetched' if age_minutes is not None and age_minutes == 0 else
                    (f'{age_minutes} minutes old' if age_minutes is not None else 'No timestamp'))
