@@ -1,4 +1,4 @@
-"""Transactional SQLite repository. Financial information never leaves the device."""
+"""Transactional SQLite repository for the current local or account workspace."""
 from datetime import datetime, timezone
 import json
 import sqlite3
@@ -18,9 +18,29 @@ def audit(con: sqlite3.Connection, event: str, object_type: str,
                 (event, object_type, object_id, details, stamp()))
 
 
+class WorkspaceConnection(sqlite3.Connection):
+    """Commit or roll back a repository operation, then release its database handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect(path: Path = DEFAULT_PATH) -> sqlite3.Connection:
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path, timeout=10)
+    con = sqlite3.connect(path, timeout=10, factory=WorkspaceConnection)
+    try:
+        _initialize(con)
+    except sqlite3.Error:
+        con.close()
+        raise
+    return con
+
+
+def _initialize(con: sqlite3.Connection) -> None:
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA foreign_keys = ON')
     con.executescript('''
@@ -54,13 +74,12 @@ def connect(path: Path = DEFAULT_PATH) -> sqlite3.Connection:
     CREATE TABLE IF NOT EXISTS AuditEvents(id INTEGER PRIMARY KEY, event TEXT NOT NULL,
       object_type TEXT NOT NULL, object_id INTEGER, details TEXT, created_at TEXT NOT NULL);
     ''')
-    return con
 
 
 class Repository:
     """CRUD for local analyses with isolated project ownership."""
     def __init__(self, path: Path = DEFAULT_PATH):
-        self.path = path
+        self.path = Path(path)
         connect(path).close()
 
     def backup_bytes(self) -> bytes:
@@ -68,12 +87,15 @@ class Repository:
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
             target = Path(folder) / 'backup.db'
-            source = sqlite3.connect(self.path)
-            destination = sqlite3.connect(target)
+            # Read-only mode refuses a missing source instead of creating an empty backup.
+            source = sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)
             try:
-                source.backup(destination)
+                destination = sqlite3.connect(target)
+                try:
+                    source.backup(destination)
+                finally:
+                    destination.close()
             finally:
-                destination.close()
                 source.close()
             return target.read_bytes()
 

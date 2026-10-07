@@ -8,7 +8,8 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from components.ui import header, repository
+from components.ui import header, repository, storage_notice
+from components.result_state import input_signature, discard_changed_result, stable_editor_base
 from core.portfolio_engine import (ACTION_COLUMNS, HOLDING_COLUMNS, analyze_portfolio,
                                    efficient_frontier, portfolio_risk_contribution,
                                    rebalance_plan)
@@ -32,7 +33,8 @@ with st.expander('How the calculations work', expanded=True):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_history(exchange: str, ticker: str, start: date, end: date):
-    return price_history(exchange, ticker, start, end)
+    history, source = price_history(exchange, ticker, start, end)
+    return history, source, datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -43,6 +45,22 @@ def cached_dividend_reference(exchange: str, ticker: str):
 def frame_records(frame: pd.DataFrame) -> list[dict]:
     """Return JSON-safe records, preserving dates and replacing NaN with null."""
     return json.loads(frame.to_json(orient='records', date_format='iso'))
+
+
+def reset_portfolio_editors(clear_inputs: bool = False) -> None:
+    st.session_state.portfolio_generation = st.session_state.get('portfolio_generation', 0) + 1
+    for key in list(st.session_state):
+        if key.startswith(('portfolio_action_editor_', 'portfolio_holding_editor_',
+                           'portfolio_weight_editor_')):
+            st.session_state.pop(key, None)
+    for key in ('portfolio_analysis', 'portfolio_analysis_signature',
+                'portfolio_history_key', 'portfolio_dividend_reference',
+                'portfolio_dividend_reference_key'):
+        st.session_state.pop(key, None)
+    if clear_inputs:
+        for key in ('portfolio_actions', 'portfolio_holdings', 'portfolio_weights',
+                    'portfolio_saved_id', 'portfolio_name', 'portfolio_name_input'):
+            st.session_state.pop(key, None)
 
 
 def display_utc(value: str) -> str:
@@ -57,16 +75,19 @@ def portfolio_payload(histories: dict[str, pd.DataFrame], actions: pd.DataFrame,
                       holdings: pd.DataFrame, weights: pd.DataFrame,
                       exchange: str, frequency: str, risk_free_rate: float) -> dict:
     return {
-        'exchange': exchange, 'frequency': frequency, 'risk_free_rate': risk_free_rate,
+        'exchange': st.session_state.get('portfolio_loaded_exchange', exchange),
+        'frequency': frequency, 'risk_free_rate': risk_free_rate,
         'histories': {ticker: frame_records(frame) for ticker, frame in histories.items()},
         'actions': frame_records(actions), 'holdings': frame_records(holdings),
         'weights': frame_records(weights),
         'sources': st.session_state.get('portfolio_sources', {}),
         'fetched_at': st.session_state.get('portfolio_fetched_at', ''),
+        'history_key': json.loads(json.dumps(st.session_state.get('portfolio_history_key'), default=str)),
     }
 
 
 def restore_portfolio(meta: dict, payload: dict) -> None:
+    reset_portfolio_editors()
     histories = {ticker: pd.DataFrame(records) for ticker, records in payload['histories'].items()}
     for frame in histories.values():
         frame['Date'] = pd.to_datetime(frame['Date'])
@@ -79,9 +100,14 @@ def restore_portfolio(meta: dict, payload: dict) -> None:
     st.session_state.portfolio_weights = pd.DataFrame(payload.get('weights', []))
     st.session_state.portfolio_sources = payload.get('sources', {})
     st.session_state.portfolio_fetched_at = payload.get('fetched_at', '')
+    stored_key = payload.get('history_key')
+    if stored_key:
+        st.session_state.portfolio_history_key = ('SAVED', tuple(histories), None, None)
     st.session_state.portfolio_saved_id = meta['id']
     st.session_state.portfolio_name = meta['name']
+    st.session_state.portfolio_name_input = meta['name']
     st.session_state.portfolio_exchange = payload.get('exchange', 'DSE')
+    st.session_state.portfolio_loaded_exchange = payload.get('exchange', 'DSE')
     st.session_state.portfolio_frequency = payload.get('frequency', 'Monthly')
     st.session_state.portfolio_risk_free = float(payload.get('risk_free_rate', 0)) * 100
     st.session_state.pop('portfolio_analysis', None)
@@ -204,28 +230,36 @@ frequency = frequency_col.selectbox('Return frequency', ['Daily', 'Weekly', 'Mon
                                      key='portfolio_frequency')
 
 fetch_col, demo_col = st.columns(2)
-if fetch_col.button('Fetch price data for selected stocks', type='primary', disabled=not tickers,
+valid_period = start <= end and (end - start).days <= 731
+if not valid_period:
+    st.warning('Choose a From date on or before To, with a period of two years or less.')
+if fetch_col.button('Fetch price data for selected stocks', type='primary', disabled=not tickers or not valid_period,
                     width='stretch'):
-    histories, sources, failures = {}, {}, []
+    histories, sources, failures, retrieved = {}, {}, [], []
     for ticker in tickers:
         try:
-            history, source = cached_history(exchange, ticker, start, end)
+            history, source, retrieved_at = cached_history(exchange, ticker, start, end)
             histories[ticker] = history
             sources[ticker] = source
+            retrieved.append(retrieved_at)
         except ValueError as exc:
             failures.append(f'{ticker}: {exc}')
     if histories:
+        reset_portfolio_editors(clear_inputs=True)
         st.session_state.portfolio_histories = histories
         st.session_state.portfolio_sources = sources
+        st.session_state.portfolio_loaded_exchange = exchange
         st.session_state.portfolio_history_key = (exchange, tuple(tickers), start, end)
-        st.session_state.portfolio_fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        st.session_state.portfolio_fetched_at = min(retrieved)
         st.success(f'Loaded price history for {len(histories)} stock(s).')
     for failure in failures:
         st.error(failure)
 
 if demo_col.button('Load fictional sample portfolio', width='stretch'):
+    reset_portfolio_editors(clear_inputs=True)
     demo_histories, demo_actions = demo_portfolio()
     st.session_state.portfolio_histories = demo_histories
+    st.session_state.portfolio_loaded_exchange = exchange
     st.session_state.portfolio_sources = {ticker: 'Fictional bundled portfolio demo'
                                           for ticker in demo_histories}
     st.session_state.portfolio_history_key = ('DEMO', tuple(demo_histories),
@@ -241,7 +275,8 @@ with st.expander('Price-data upload fallback'):
     upload = st.file_uploader('Combined price-history file', type=['csv', 'xlsx'], key='portfolio_price_file')
     if upload and st.button('Use uploaded portfolio prices'):
         try:
-            combined = read_price_file(upload.getvalue(), upload.name, tickers[0] if len(tickers) == 1 else '')
+            combined = read_price_file(upload.getvalue(), upload.name,
+                                       tickers[0] if len(tickers) == 1 else '', allow_multiple=True)
             found = sorted(combined['Ticker'].astype(str).str.upper().unique())
             chosen = tickers or found
             histories = {ticker: combined[combined['Ticker'].astype(str).str.upper().eq(ticker)].copy()
@@ -249,9 +284,11 @@ with st.expander('Price-data upload fallback'):
             histories = {ticker: frame for ticker, frame in histories.items() if not frame.empty}
             if not histories:
                 raise ValueError('The file has no rows for the selected tickers.')
+            reset_portfolio_editors(clear_inputs=True)
             st.session_state.portfolio_histories = histories
             st.session_state.portfolio_sources = {ticker: f'User upload: {upload.name}' for ticker in histories}
-            st.session_state.portfolio_history_key = (exchange, tuple(chosen), start, end)
+            st.session_state.portfolio_loaded_exchange = exchange
+            st.session_state.portfolio_history_key = ('UPLOAD', tuple(chosen), None, None)
             st.session_state.portfolio_fetched_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
             st.success(f'Loaded uploaded prices for {len(histories)} stock(s).')
         except ValueError as exc:
@@ -260,7 +297,14 @@ with st.expander('Price-data upload fallback'):
 histories = st.session_state.get('portfolio_histories', {})
 if histories:
     available = list(histories)
+    loaded_key = st.session_state.get('portfolio_history_key')
+    current_key = (exchange, tuple(tickers), start, end)
+    if loaded_key and loaded_key[0] not in {'DEMO', 'UPLOAD', 'SAVED'} and loaded_key != current_key:
+        st.warning('The selection or dates changed. The loaded prices below still belong to the previous '
+                   'request. Fetch again to update the workspace; calculations use the displayed histories.')
     st.subheader('Price history')
+    st.caption(f"Loaded market context: {st.session_state.get('portfolio_loaded_exchange', exchange)}. "
+               'Calculations and saved workspaces use the displayed price data and source references.')
     close_frames = []
     for ticker, frame in histories.items():
         series = frame[['Date', 'Close']].copy()
@@ -287,17 +331,20 @@ if histories:
         for ticker in available:
             try:
                 annual = cached_dividend_reference(exchange, ticker)
-                detail = annual.details[annual.details['Exchange metric'].isin(['Dividend', 'Dividend Yield'])].copy()
+                detail = annual.details[annual.details['Exchange metric'].isin(
+                    ['Cash Dividend', 'Stock Dividend', 'Dividend', 'Dividend Yield'])].copy()
                 detail.insert(0, 'Ticker', ticker)
                 references.append(detail)
             except ValueError as exc:
                 failures.append(f'{ticker}: {exc}')
         st.session_state.portfolio_dividend_reference = (
             pd.concat(references, ignore_index=True) if references else pd.DataFrame())
+        st.session_state.portfolio_dividend_reference_key = (exchange, tuple(available))
         for failure in failures:
             st.error(failure)
     reference = st.session_state.get('portfolio_dividend_reference')
-    if isinstance(reference, pd.DataFrame) and not reference.empty:
+    if (st.session_state.get('portfolio_dividend_reference_key') == (exchange, tuple(available))
+            and isinstance(reference, pd.DataFrame) and not reference.empty):
         st.dataframe(reference, hide_index=True, width='stretch')
 
     action_key = 'portfolio_actions'
@@ -306,8 +353,11 @@ if histories:
             {**{column: 0.0 for column in ACTION_COLUMNS}, 'Date': pd.NaT,
              'Ticker': ticker, 'Source': ''} for ticker in available
         ]).reindex(columns=ACTION_COLUMNS)
+    generation = st.session_state.get('portfolio_generation', 0)
+    action_editor_key = f'portfolio_action_editor_{generation}'
     actions = st.data_editor(
-        st.session_state[action_key], num_rows='dynamic', hide_index=True, width='stretch',
+        stable_editor_base(st.session_state, action_editor_key, st.session_state[action_key]),
+        num_rows='dynamic', hide_index=True, width='stretch',
         column_config={
             'Date': st.column_config.DateColumn('Effective / record date', format='DD/MM/YYYY'),
             'Ticker': st.column_config.SelectboxColumn('Ticker', options=available, required=True),
@@ -321,7 +371,7 @@ if histories:
             'Split New Shares': st.column_config.NumberColumn('Split: new shares', min_value=0.0),
             'Split Old Shares': st.column_config.NumberColumn('Split: old shares', min_value=0.0),
             'Source': st.column_config.TextColumn('Source / notice reference'),
-        }, key='portfolio_action_editor')
+        }, key=action_editor_key)
     st.session_state[action_key] = actions
 
     st.subheader('Holdings and transaction costs')
@@ -332,14 +382,16 @@ if histories:
              'Purchase Price': float(pd.to_numeric(histories[ticker]['Close']).iloc[0]),
              'Initial Fees': 0.0, 'Exit Fees': 0.0} for ticker in available
         ], columns=HOLDING_COLUMNS)
+    holding_editor_key = f'portfolio_holding_editor_{generation}'
     holdings_edited = st.data_editor(
-        st.session_state.portfolio_holdings, hide_index=True, width='stretch', disabled=['Ticker'],
+        stable_editor_base(st.session_state, holding_editor_key, st.session_state.portfolio_holdings),
+        hide_index=True, width='stretch', disabled=['Ticker'],
         column_config={
             'Initial Shares': st.column_config.NumberColumn('Starting shares', min_value=0.000001),
             'Purchase Price': st.column_config.NumberColumn('Purchase price / share (BDT)', min_value=0.000001),
             'Initial Fees': st.column_config.NumberColumn('Purchase fees (BDT)', min_value=0.0),
             'Exit Fees': st.column_config.NumberColumn('Estimated sale fees (BDT)', min_value=0.0),
-        }, key='portfolio_holding_editor')
+        }, key=holding_editor_key)
     st.session_state.portfolio_holdings = holdings_edited
     st.caption('Purchase price controls the holding-period cost basis. Periodic volatility still uses the selected price-history period.')
 
@@ -349,10 +401,12 @@ if histories:
     weight_frame = (saved_weights if isinstance(saved_weights, pd.DataFrame)
                     and set(saved_weights.get('Ticker', [])) == set(available)
                     else pd.DataFrame({'Ticker': available, 'Weight %': [default_weight] * len(available)}))
+    weight_editor_key = f'portfolio_weight_editor_{generation}'
     weights_edited = st.data_editor(
-        weight_frame, hide_index=True, width='stretch', disabled=['Ticker'],
+        stable_editor_base(st.session_state, weight_editor_key, weight_frame),
+        hide_index=True, width='stretch', disabled=['Ticker'],
         column_config={'Weight %': st.column_config.NumberColumn(min_value=0.0, max_value=100.0)},
-        key='portfolio_weight_editor')
+        key=weight_editor_key)
     st.session_state.portfolio_weights = weights_edited
     total_weight = float(weights_edited['Weight %'].sum())
     st.caption(f'Weights currently total {total_weight:.2f}%. They are normalized to 100% for calculation.')
@@ -365,6 +419,12 @@ if histories:
         'Comparison benchmark', ['Equal-weight basket', *available], key='portfolio_benchmark',
         help='Choose one selected stock or an equal-weight basket as a simple return reference.')
 
+    portfolio_signature = input_signature(histories, actions, holdings_edited, weights_edited,
+                                          st.session_state.get('portfolio_loaded_exchange'),
+                                          frequency, risk_free_percent, benchmark,
+                                          st.session_state.get('portfolio_sources', {}))
+    if discard_changed_result(st.session_state, 'portfolio_analysis', portfolio_signature):
+        st.info('Portfolio inputs changed. Calculate again to refresh the results and report.')
     if st.button('Calculate portfolio return and risk', type='primary'):
         try:
             weights = dict(zip(weights_edited.Ticker, weights_edited['Weight %']))
@@ -372,6 +432,7 @@ if histories:
                 histories, actions, weights, frequency, holdings_edited, risk_free_percent / 100)
             st.session_state.portfolio_analysis_frequency = frequency
             st.session_state.portfolio_analysis_benchmark = benchmark
+            st.session_state.portfolio_analysis_signature = portfolio_signature
         except ValueError as exc:
             st.error(str(exc))
 
@@ -387,7 +448,7 @@ if histories:
                 save_name, payload, st.session_state.get('portfolio_saved_id'))
             st.session_state.portfolio_saved_id = saved_id
             st.session_state.portfolio_name = save_name
-            st.success('Portfolio saved on this device.')
+            st.success('Portfolio saved. ' + storage_notice())
         except ValueError as exc:
             st.error(str(exc))
     if save_copy_col.button('Save as new copy', width='stretch'):

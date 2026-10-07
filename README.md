@@ -6,6 +6,8 @@
 
 **Live app:** [falcon-finalysis](https://maeqqfkpaqxeomfknnsfaa.streamlit.app/)
 
+Reliability audit: [07/10/2026 fixes, verification and remaining limits](docs/AUDIT_2026-10-07.md).
+
 ![Falcon Finalysis concept C wordmark](assets/logo-active.png)
 
 A local-first Python application, with a public hosted demo, that turns annual financial statements into ratios,
@@ -31,7 +33,7 @@ On macOS/Linux, replace `.venv\Scripts\python` with `.venv/bin/python`.
 If Windows provides `py` instead of `python`, use `py -3 -m venv .venv` for the first command.
 After installation, `start.ps1` is a convenience launcher on Windows.
 
-Open **http://127.0.0.1:8501**, then choose **Load Demo Company** or enable
+Open **http://127.0.0.1:8501**, then choose **Try a complete demo**, **Load Demo Company** or enable
 **Portfolio Demo Mode**. No API keys, subscriptions or paid services are required.
 Package installation and optional live DSE/CSE lookup require internet access; uploaded
 statements, calculations, projects and reports stay on the local computer.

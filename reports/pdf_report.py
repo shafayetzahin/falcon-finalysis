@@ -68,7 +68,7 @@ def pdf_report(a, meta: dict, scenario: dict | None = None,
                     line.append(p(text, 'CellFS'))
                 rows.append(line)
             widths = [165] + [(511-165)/len(panel.columns)]*len(panel.columns)
-            table = Table(rows, colWidths=widths, repeatRows=1, hAlign='LEFT')
+            table = Table(rows, colWidths=widths, repeatRows=1, splitInRow=1, hAlign='LEFT')
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DCECEF')),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#F2F6FA'), colors.white]),

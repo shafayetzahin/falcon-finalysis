@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from components.ui import header
+from components.result_state import input_signature, discard_changed_result
 from core.valuation_engine import (calculate_wacc, comparable_valuation,
                                    discounted_cash_flow, roic_reinvestment)
 
@@ -67,10 +68,20 @@ st.dataframe(roic.style.format({"NOPAT": "{:,.1f}", "Invested Capital": "{:,.1f}
                                 "ROIC": "{:.2%}", "Reinvestment": "{:,.1f}",
                                 "Reinvestment Rate": "{:.2%}", "Intrinsic Growth": "{:.2%}"}),
              hide_index=True, width="stretch")
-st.caption("Screening definitions: invested capital = interest-bearing debt + equity - cash; reinvestment = capex - depreciation + change in current working capital.")
+st.caption("Screening definitions: invested capital = interest-bearing debt + equity - cash; ROIC uses average invested capital (ending balance for the first year). Reinvestment = capex - depreciation + change in noncash operating working capital, excluding cash and short-term debt. Missing inputs remain unavailable.")
 
 st.subheader("3 · FCFF discounted cash flow")
-base_default = max(value("Operating Cash Flow") - value("Capital Expenditure"), 0.0)
+base_default = max(value("Operating Cash Flow") - value("Capital Expenditure")
+                   + value("Interest Expense") * (1 - tax_rate), 0.0)
+st.caption('The suggested FCFF is operating cash flow minus capex plus after-tax interest. '
+           'Review interest classification and cash-flow adjustments in the original statements.')
+required_inputs = ['Operating Cash Flow', 'Capital Expenditure', 'Interest Expense', 'Shares Outstanding']
+missing_inputs = [name for name in required_inputs if pd.isna(latest.get(name))]
+if missing_inputs:
+    st.warning('Statement defaults are incomplete: ' + ', '.join(missing_inputs) +
+               '. Enter reviewed shares and FCFF before calculating.')
+reviewed_base = st.checkbox('I verified shares outstanding and the base FCFF against the source statements',
+                            key=f"valuation_review_{st.session_state.get('project_generation', 0)}")
 dcf_cols = st.columns(3)
 base_fcff = dcf_cols[0].number_input("Reviewed base FCFF", min_value=0.0, value=base_default)
 forecast_growth = dcf_cols[1].number_input("Annual FCFF growth %", -99.0, 200.0, 8.0, .5) / 100
@@ -82,10 +93,17 @@ peers = st.data_editor(pd.DataFrame([
     {"Company": "Peer 1", "EV/Revenue": None, "EV/EBITDA": None, "P/E": None},
     {"Company": "Peer 2", "EV/Revenue": None, "EV/EBITDA": None, "P/E": None},
     {"Company": "Peer 3", "EV/Revenue": None, "EV/EBITDA": None, "P/E": None},
-]), num_rows="dynamic", hide_index=True, width="stretch", key="valuation_peers")
+]), num_rows="dynamic", hide_index=True, width="stretch",
+    key=f"valuation_peers_{st.session_state.get('project_generation', 0)}")
 st.caption("Use comparable companies with aligned currency, fiscal basis and multiple definitions. Empty or nonpositive multiples are excluded.")
 
-if st.button("Calculate valuation range", type="primary"):
+valuation_signature = input_signature(frame, meta.get('company_name'), meta.get('currency'),
+                                      shares, market_price, debt, cash, risk_free, equity_premium,
+                                      beta, debt_cost, tax_rate, rate_source, base_fcff,
+                                      forecast_growth, terminal_growth, years, peers, reviewed_base)
+if discard_changed_result(st.session_state, 'valuation_result', valuation_signature):
+    st.info('Valuation inputs changed. Calculate again to refresh the result.')
+if st.button("Calculate valuation range", type="primary", disabled=not reviewed_base):
     if not rate_source.strip():
         st.error("Enter the market-assumption source and as-of date.")
     else:
@@ -95,6 +113,7 @@ if st.button("Calculate valuation range", type="primary"):
             comps = comparable_valuation(peers, value("Revenue"), value("EBITDA"),
                                          value("Net Income"), debt, cash, shares)
             st.session_state.valuation_result = (dcf, comps, rate_source)
+            st.session_state.valuation_result_signature = valuation_signature
         except ValueError as exc:
             st.error(str(exc))
 

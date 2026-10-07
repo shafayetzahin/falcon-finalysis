@@ -15,7 +15,7 @@ def require_account(show_controls: bool = True) -> None:
         if not all(auth.get(key) for key in ('redirect_uri', 'cookie_secret', 'client_id',
                                              'client_secret', 'server_metadata_url')):
             raise ValueError('Incomplete provider settings')
-    except (KeyError, FileNotFoundError, ValueError):
+    except (KeyError, FileNotFoundError, ValueError, TypeError, AttributeError):
         st.error('Sign-in setup is incomplete. Contact the administrator.')
         st.stop()
     if not st.user.get('is_logged_in', False):

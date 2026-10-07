@@ -1,4 +1,4 @@
-# Falcon Finalysis V1 verification record
+# Falcon Finalysis verification record — 07/10/2026
 
 Verified on Windows with Python 3.12, Streamlit 1.63.0, pandas 3.0.1,
 NumPy 2.3.5, Plotly 7.0.0, openpyxl 3.1.5 and ReportLab 4.4.9.
@@ -8,7 +8,7 @@ interpreter version was not available for a second platform run.
 
 ## Automated coverage
 
-**85 pytest cases** cover:
+**237 pytest cases** cover:
 
 - Independent expected current/quick/cash/OCF ratios, margins, ROA/ROE,
   debt/equity vs liabilities/equity, interest coverage, turnover, operating days,
@@ -51,7 +51,29 @@ interpreter version was not available for a second platform run.
 
 Ruff checks and Python compilation also pass.
 
+The October reliability audit added independent regressions for numeric-prefix corruption,
+scientific notation, duplicate/formula/oversized spreadsheet uploads, invalid transaction rows,
+CSE identity and profile labels, cash/stock dividend distinctions, common portfolio intervals,
+initial-capital drawdown, risk-free downside targets, missing credit months, excluded financing
+receipts, debt-service double counting, finite valuation assumptions, recovery integrity,
+consistent SQLite WAL backups, source corrections and stale UI results. UI tests verify changed
+inputs remove exports, withdrawn consent removes credit results, new portfolios reset holding
+edits, new companies require fresh valuation confirmation, and human review is checked at submission.
+See [AUDIT_2026-10-07.md](AUDIT_2026-10-07.md) for this release's changes and limits.
+
 ## Live application checks
+
+On 07/10/2026, official connector checks returned DSE SQURPHARMA and OLYMPIC company
+details, eight annual years (2018–2025), and 26 dated price rows each for
+01/09/2026–06/10/2026. CSE SQURPHARMA returned five annual years (2021–2025) and
+25 price rows, with its last returned date 05/10/2026. The missing final requested
+date is disclosed as source coverage, not filled in. CSE company identity and dividend
+markers were verified again after the parser repair. The local staging browser verified
+the dismissible first-session notice, the complete-demo button, chart/metric rendering,
+light/dark navigation and readable dropdown options. Caption opacity and help-icon
+stroke colors were repaired based on computed browser styles and screenshots.
+
+The following paragraphs record earlier delivery checks, not an additional current device run.
 
 The app started successfully on `127.0.0.1:8501`. Browser inspection verified the
 first-session decision-support notice, its dismiss control, landing page, demo loading,

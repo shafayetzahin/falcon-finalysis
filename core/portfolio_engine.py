@@ -46,13 +46,21 @@ def _holdings(frame: pd.DataFrame | None, tickers: list[str]) -> pd.DataFrame:
     out = frame.copy().reindex(columns=HOLDING_COLUMNS)
     out["Ticker"] = out["Ticker"].astype("string").str.strip().str.upper()
     for column in HOLDING_COLUMNS[1:]:
-        out[column] = pd.to_numeric(out[column], errors="coerce")
+        original = out[column]
+        out[column] = pd.to_numeric(original, errors="coerce")
+        if (original.notna() & ~np.isfinite(out[column])).any():
+            raise ValueError(f"{column} must contain finite numbers or blank cells.")
+    if out["Ticker"].isna().any() or out["Ticker"].eq("").any():
+        raise ValueError("Every holding must have a ticker.")
     if out["Ticker"].duplicated().any():
         raise ValueError("Each ticker can appear only once in holdings.")
     if (out["Initial Shares"].fillna(0) <= 0).any():
         raise ValueError("Initial shares must be greater than zero.")
     if (out[["Initial Fees", "Exit Fees"]].fillna(0) < 0).any().any():
         raise ValueError("Transaction fees cannot be negative.")
+    if (out["Purchase Price"].dropna() <= 0).any():
+        raise ValueError("Purchase prices must be positive or left blank to use the start close.")
+    out[["Initial Fees", "Exit Fees"]] = out[["Initial Fees", "Exit Fees"]].fillna(0.0)
     indexed = out.set_index("Ticker")
     rows = []
     for ticker in tickers:
@@ -70,26 +78,44 @@ def _actions(frame: pd.DataFrame | None) -> pd.DataFrame:
     if frame is None or frame.empty:
         return empty_actions()
     out = frame.copy().reindex(columns=ACTION_COLUMNS)
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce", format="mixed", dayfirst=True)
     out["Ticker"] = out["Ticker"].astype("string").str.strip().str.upper()
+    if out["Date"].isna().any() or out["Ticker"].isna().any() or out["Ticker"].eq("").any():
+        raise ValueError("Every corporate action needs a valid date and ticker.")
     numeric = [column for column in ACTION_COLUMNS if column not in {"Date", "Ticker", "Source"}]
     for column in numeric:
-        out[column] = pd.to_numeric(out[column], errors="coerce").fillna(0.0)
+        original = out[column]
+        out[column] = pd.to_numeric(original, errors="coerce")
+        if (original.notna() & ~np.isfinite(out[column])).any():
+            raise ValueError(f"{column} must contain finite numbers or blank cells.")
+        out[column] = out[column].fillna(0.0)
         if (out[column] < 0).any():
             raise ValueError(f"{column} cannot be negative.")
-    return out.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    for new, old in [("Rights New Shares", "Rights Held Shares"),
+                     ("Split New Shares", "Split Old Shares")]:
+        if ((out[new] > 0) != (out[old] > 0)).any():
+            raise ValueError(f"{new} and {old} must both be positive to define the ratio.")
+    needs_face_value = (out["Cash Dividend %"] > 0) & (out["Cash Dividend per Share"] == 0)
+    if (needs_face_value & (out["Face Value"] <= 0)).any():
+        raise ValueError("Cash dividend percentages require a positive face value.")
+    if out.duplicated(subset=["Date", "Ticker", *numeric]).any():
+        raise ValueError("Duplicate corporate actions would count the same entitlement twice.")
+    return out.sort_values("Date", kind="stable").reset_index(drop=True)
 
 
 def _prices(history: pd.DataFrame, ticker: str) -> pd.Series:
     if not {"Date", "Close"}.issubset(history.columns):
         raise ValueError(f"{ticker}: price history needs Date and Close columns.")
     frame = history.copy()
-    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
-    frame["Close"] = pd.to_numeric(frame["Close"], errors="coerce")
     if "Ticker" in frame:
-        frame = frame[frame["Ticker"].astype(str).str.upper().eq(ticker)]
-    frame = frame.dropna(subset=["Date", "Close"])
-    frame = frame[frame["Close"] > 0].sort_values("Date").drop_duplicates("Date", keep="last")
+        frame = frame[frame["Ticker"].astype(str).str.strip().str.upper().eq(ticker)]
+    frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce", format="mixed", dayfirst=True)
+    frame["Close"] = pd.to_numeric(frame["Close"], errors="coerce")
+    if frame["Date"].isna().any() or not np.isfinite(frame["Close"]).all() or (frame["Close"] <= 0).any():
+        raise ValueError(f"{ticker}: every price needs a valid date and a finite positive close.")
+    if frame["Date"].duplicated().any():
+        raise ValueError(f"{ticker}: duplicate price dates must be resolved before analysis.")
+    frame = frame.sort_values("Date")
     if len(frame) < 2:
         raise ValueError(f"{ticker}: at least two positive closing prices are required.")
     return frame.set_index("Date")["Close"].astype(float)
@@ -169,6 +195,10 @@ def _asset_analysis(ticker: str, history: pd.DataFrame, actions: pd.DataFrame,
         "Total Return %": total_gain / invested if invested else np.nan,
         "Price Return %": end_price / start_price - 1,
     }
+    if not all(np.isfinite(value) for value in summary.values() if isinstance(value, (int, float))):
+        raise ValueError(f"{ticker}: holding results exceed the supported numeric range.")
+    if not np.isfinite(returns).all():
+        raise ValueError(f"{ticker}: return results exceed the supported numeric range.")
     return summary, pd.Series(returns, index=return_dates, name=ticker, dtype=float)
 
 
@@ -177,7 +207,8 @@ def _periodic(daily: pd.DataFrame, frequency: str) -> tuple[pd.DataFrame, int]:
         raise ValueError("Return frequency must be Daily, Weekly or Monthly.")
     rule, annual_periods = FREQUENCIES[frequency]
     if rule:
-        daily = daily.resample(rule).apply(lambda values: (1 + values.dropna()).prod() - 1)
+        daily = daily.resample(rule).apply(
+            lambda values: (1 + values.dropna()).prod() - 1 if values.notna().any() else np.nan)
     return daily.dropna(how="all"), annual_periods
 
 
@@ -188,14 +219,25 @@ def analyze_portfolio(price_history: dict[str, pd.DataFrame], actions: pd.DataFr
     """Calculate holding-period results and aligned periodic portfolio risk statistics."""
     if not price_history:
         raise ValueError("Add price history for at least one stock.")
+    if not np.isfinite(risk_free_rate) or risk_free_rate <= -1:
+        raise ValueError("Risk-free rate must be finite and greater than -100%.")
     clean_actions = _actions(actions)
     normalized_tickers = [str(ticker).strip().upper() for ticker in price_history]
+    if any(not ticker for ticker in normalized_tickers) or len(set(normalized_tickers)) != len(normalized_tickers):
+        raise ValueError("Price histories must have unique, nonempty ticker names.")
+    normalized_history = dict(zip(normalized_tickers, price_history.values()))
+    # A return ending on a common date can still cover different horizons. Align
+    # closing-price boundaries first, then calculate each asset's interval return.
+    common_prices = pd.concat({ticker: _prices(history, ticker)
+                               for ticker, history in normalized_history.items()}, axis=1).dropna()
+    if len(common_prices) < 3:
+        raise ValueError("The selected stocks need at least three common closing-price dates for risk statistics.")
     clean_holdings = _holdings(holdings, normalized_tickers).set_index("Ticker")
     summaries, series = [], []
-    for raw_ticker, history in price_history.items():
-        ticker = str(raw_ticker).strip().upper()
-        summary, asset_returns = _asset_analysis(ticker, history, clean_actions,
-                                                 clean_holdings.loc[ticker])
+    for ticker, history in normalized_history.items():
+        summary, _ = _asset_analysis(ticker, history, clean_actions, clean_holdings.loc[ticker])
+        aligned_history = common_prices[ticker].rename("Close").rename_axis("Date").reset_index()
+        _, asset_returns = _asset_analysis(ticker, aligned_history, clean_actions, clean_holdings.loc[ticker])
         summaries.append(summary)
         series.append(asset_returns)
     daily = pd.concat(series, axis=1).sort_index()
@@ -204,9 +246,16 @@ def analyze_portfolio(price_history: dict[str, pd.DataFrame], actions: pd.DataFr
     if len(aligned) < 2:
         raise ValueError("The selected stocks need at least two aligned return observations for risk statistics.")
 
-    tickers = list(price_history)
-    supplied = weights or {ticker: 1 for ticker in tickers}
+    tickers = normalized_tickers
+    supplied = ({str(ticker).strip().upper(): value for ticker, value in weights.items()}
+                if weights is not None else {ticker: 1 for ticker in tickers})
+    if weights is not None and len(supplied) != len(weights):
+        raise ValueError("Portfolio weights must have unique ticker names.")
+    if set(supplied) - set(tickers):
+        raise ValueError("Portfolio weights include tickers without price history.")
     weight_values = pd.Series({ticker: float(supplied.get(ticker, 0)) for ticker in tickers})
+    if not np.isfinite(weight_values).all() or not np.isfinite(weight_values.sum()):
+        raise ValueError("Portfolio weights must be finite numbers.")
     if (weight_values < 0).any() or weight_values.sum() <= 0:
         raise ValueError("Portfolio weights must be nonnegative and sum to more than zero.")
     weight_values /= weight_values.sum()
@@ -215,37 +264,42 @@ def analyze_portfolio(price_history: dict[str, pd.DataFrame], actions: pd.DataFr
     annual_covariance = covariance * annual_periods
     annual_returns = aligned.mean() * annual_periods
     annual_volatility = aligned.std(ddof=1) * np.sqrt(annual_periods)
-    downside = aligned.clip(upper=0).pow(2).mean().pow(.5) * np.sqrt(annual_periods)
+    periodic_target = (1 + risk_free_rate) ** (1 / annual_periods) - 1
+    excess_returns = aligned - periodic_target
+    downside = excess_returns.clip(upper=0).pow(2).mean().pow(.5) * np.sqrt(annual_periods)
     wealth = (1 + aligned).cumprod()
-    drawdown = wealth.div(wealth.cummax()).sub(1).min()
+    drawdown = wealth.div(wealth.cummax().clip(lower=1.0)).sub(1).min()
     risk = pd.DataFrame({
         "Average Return": aligned.mean(),
         "Standard Deviation": aligned.std(ddof=1),
         "Variance": aligned.var(ddof=1),
         "Annualized Average Return": annual_returns,
         "Annualized Volatility": annual_volatility,
-        "Sharpe Ratio": (annual_returns - risk_free_rate) / annual_volatility.replace(0, np.nan),
-        "Sortino Ratio": (annual_returns - risk_free_rate) / downside.replace(0, np.nan),
+        "Sharpe Ratio": (excess_returns.mean() * annual_periods) / annual_volatility.replace(0, np.nan),
+        "Sortino Ratio": (excess_returns.mean() * annual_periods) / downside.replace(0, np.nan),
         "Maximum Drawdown": drawdown,
         "Weight": weight_values,
     }).rename_axis("Ticker").reset_index()
     portfolio_returns = aligned.mul(weight_values, axis=1).sum(axis=1).rename("Portfolio")
     portfolio_annual_return = float(portfolio_returns.mean() * annual_periods)
     portfolio_volatility = float(portfolio_returns.std(ddof=1) * np.sqrt(annual_periods))
-    portfolio_downside = float(portfolio_returns.clip(upper=0).pow(2).mean() ** .5 * np.sqrt(annual_periods))
+    portfolio_excess = portfolio_returns - periodic_target
+    portfolio_excess_annual = float(portfolio_excess.mean() * annual_periods)
+    portfolio_downside = float(portfolio_excess.clip(upper=0).pow(2).mean() ** .5 * np.sqrt(annual_periods))
     portfolio_wealth = (1 + portfolio_returns).cumprod()
-    maximum_drawdown = float(portfolio_wealth.div(portfolio_wealth.cummax()).sub(1).min())
+    maximum_drawdown = float(portfolio_wealth.div(portfolio_wealth.cummax().clip(lower=1.0)).sub(1).min())
     historical_var = float(max(0.0, -portfolio_returns.quantile(.05)))
     asset_summary = pd.DataFrame(summaries)
     portfolio_summary = {
+        "Annualization Periods": float(annual_periods),
         "Average Return": float(portfolio_returns.mean()),
         "Standard Deviation": float(portfolio_returns.std(ddof=1)),
         "Variance": float(portfolio_returns.var(ddof=1)),
         "Annualized Average Return": portfolio_annual_return,
         "Annualized Volatility": portfolio_volatility,
-        "Sharpe Ratio": ((portfolio_annual_return - risk_free_rate) / portfolio_volatility
+        "Sharpe Ratio": (portfolio_excess_annual / portfolio_volatility
                          if portfolio_volatility else np.nan),
-        "Sortino Ratio": ((portfolio_annual_return - risk_free_rate) / portfolio_downside
+        "Sortino Ratio": (portfolio_excess_annual / portfolio_downside
                           if portfolio_downside else np.nan),
         "Maximum Drawdown": maximum_drawdown,
         "Historical VaR 95%": historical_var,
@@ -278,6 +332,8 @@ def portfolio_risk_contribution(analysis: PortfolioAnalysis) -> pd.DataFrame:
 def efficient_frontier(analysis: PortfolioAnalysis, risk_free_rate: float = 0.0,
                        simulations: int = 2500) -> pd.DataFrame:
     """Create a deterministic long-only opportunity set from analyzed return history."""
+    if not np.isfinite(risk_free_rate) or risk_free_rate <= -1:
+        raise ValueError("Risk-free rate must be finite and greater than -100%.")
     tickers = list(analysis.annualized_covariance.columns)
     annual_returns = analysis.risk_summary.set_index("Ticker").loc[
         tickers, "Annualized Average Return"].to_numpy(float)
@@ -286,7 +342,9 @@ def efficient_frontier(analysis: PortfolioAnalysis, risk_free_rate: float = 0.0,
     weights = rng.dirichlet(np.ones(len(tickers)), size=max(int(simulations), 100))
     returns = weights @ annual_returns
     volatility = np.sqrt(np.maximum(np.einsum("ij,jk,ik->i", weights, covariance, weights), 0))
-    sharpe = np.divide(returns - risk_free_rate, volatility,
+    annual_periods = analysis.portfolio_summary.get('Annualization Periods', 252.0)
+    annual_target = ((1 + risk_free_rate) ** (1 / annual_periods) - 1) * annual_periods
+    sharpe = np.divide(returns - annual_target, volatility,
                        out=np.full_like(returns, np.nan), where=volatility > 0)
     result = pd.DataFrame({"Annualized Return": returns, "Annualized Volatility": volatility,
                            "Sharpe Ratio": sharpe})
@@ -297,8 +355,14 @@ def efficient_frontier(analysis: PortfolioAnalysis, risk_free_rate: float = 0.0,
 
 def rebalance_plan(current_values: dict[str, float], target_weights: dict[str, float]) -> pd.DataFrame:
     """Calculate reviewable buy/sell amounts for a long-only target allocation."""
-    current = pd.Series({str(key).upper(): float(value) for key, value in current_values.items()})
-    target = pd.Series({str(key).upper(): float(value) for key, value in target_weights.items()})
+    current = pd.Series({str(key).strip().upper(): float(value) for key, value in current_values.items()}, dtype=float)
+    target = pd.Series({str(key).strip().upper(): float(value) for key, value in target_weights.items()}, dtype=float)
+    if len(current) != len(current_values) or len(target) != len(target_weights):
+        raise ValueError("Allocation tickers must be unique after normalizing their names.")
+    if not np.isfinite(current).all() or not np.isfinite(target).all():
+        raise ValueError("Portfolio values and target weights must be finite numbers.")
+    if not np.isfinite(current.sum()) or not np.isfinite(target.sum()):
+        raise ValueError("Portfolio totals exceed the supported numeric range.")
     if (current < 0).any() or current.sum() <= 0:
         raise ValueError("Current portfolio values must be nonnegative and sum to more than zero.")
     if (target < 0).any() or target.sum() <= 0:

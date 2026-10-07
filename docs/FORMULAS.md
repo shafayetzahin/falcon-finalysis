@@ -93,3 +93,58 @@ Sensitivity changes one driver at a time: revenue growth and gross margin +/-5pp
 The Health Score Methodology page exposes every threshold. The central POLICY in core/health_score.py allocates category weights equally to two metrics, interpolates linearly and clips each metric to 0–100. The overall score is normalized over observed weights only when weighted coverage is at least 75% and all categories have evidence. Revenue Stability uses the population standard deviation of two annual growth rates.
 
 Risk flags use documented generic thresholds in core/risk_engine.py. They are questions for investigation, not causal findings, predictions, credit ratings or advice.
+
+## Portfolio return and risk
+
+- Holding cost = starting shares × purchase price + purchase fees + rights subscriptions.
+  Ending value includes dated stock dividends, splits and subscribed rights; cash dividends remain cash.
+  Total gain = ending value + received cash dividends - holding cost - estimated sale fees.
+  Holding-period dividend yield = cash dividends / holding cost; total return = total gain / holding cost.
+- Portfolio risk first aligns common closing-price dates. Each asset's interval return covers the
+  same observed start/end dates, with dated corporate actions included. Periodic returns compound
+  within calendar week/month bins. A bin with no observations is unavailable, not zero.
+- Average return is arithmetic. Variance, standard deviation and covariance use sample estimates
+  (`ddof=1`). Annualization factors are conventionally 252, 52 and 12 for daily, weekly and monthly
+  observations; exchange-specific holiday calendars are not modeled.
+- The annual risk-free input becomes periodic target `(1 + annual rate)^(1 / periods) - 1`.
+  Sharpe = annualized mean excess return / annualized standard deviation. Sortino divides the
+  same excess return by root-mean-square shortfall below that periodic target, annualized.
+  The simulated opportunity set uses the same risk-free conversion.
+- Drawdown includes initial capital as a starting high-water mark. Historical VaR is the positive
+  loss magnitude at the observed fifth return percentile. Zero volatility makes ratios unavailable.
+- Weights are explicit nonnegative capital proportions, normalized to 100%. The periodic basket
+  models a constant-weight portfolio; it is distinct from the actual buy-and-hold holdings summary.
+  Missing common dates and unequal history spans can limit representativeness. These are historical
+  estimates, not predicted investment outcomes.
+
+## Valuation screening
+
+- Cost of equity = risk-free rate + reviewed beta × equity risk premium.
+  WACC uses market-equity and interest-bearing-debt capital weights, with after-tax debt cost.
+- FCFF is a reviewed input. The UI suggests OCF - capex + after-tax interest, conditional on
+  interest being included in OCF; source classification and adjustments require review.
+- Enterprise DCF value = discounted explicit FCFF + discounted perpetuity terminal value.
+  Terminal value = final FCFF × (1 + terminal growth) / (WACC - terminal growth).
+  WACC must exceed terminal growth; impossible sensitivity cells stay unavailable.
+  Equity value = enterprise value + cash - debt; value/share uses reviewed shares outstanding.
+- Invested capital = interest-bearing debt + equity - cash. ROIC uses NOPAT / average invested
+  capital, with ending capital as first-year fallback. NOPAT = EBIT × (1 - tax rate).
+  Noncash operating working capital = current assets - cash - current liabilities + short-term debt.
+  Reinvestment = capex - depreciation + change in operating working capital.
+  Reinvestment rate = reinvestment / positive NOPAT; intrinsic growth = ROIC × reinvestment rate.
+  Missing inputs remain unavailable.
+
+## CredGrid pilot cash-flow model
+
+Model `CG-CF-1.2` uses the full calendar-month span of supplied transactions. Internal months with
+no rows withhold the score and proposed amount until complete coverage is reviewed. It separates
+reviewed financing, owner, personal and transfer receipts from counted business inflows. Other counted
+receipt categories are explicitly unverified revenue. Missing balance evidence earns no balance points.
+
+Operating surplus = average counted inflows - reviewed monthly operating expenses. Categorized debt
+repayments are excluded from operating expenses. Effective debt service = max(declared monthly debt
+service, observed average debt repayments). Maximum new payment = max(operating surplus / minimum
+DSCR - effective debt service, 0). Loan capacity discounts the payment annuity at annual proposed
+rate / 12. Modeled amount = min(request, capacity), subject to evidence withholding. Proposed annual
+rate sums the reviewed risk-free rate and operating, liquidity and credit premiums; at least one
+premium must be positive. This pilot score is not calibrated to repayment defaults.

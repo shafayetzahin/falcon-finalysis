@@ -8,6 +8,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import LineChart, Reference
 from openpyxl.drawing.image import Image as XLImage
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from core.config import FIELDS, INCOME, BALANCE, CASH_FLOW, OPTIONAL, DISCLAIMER, AVERAGE_POLICY
 from core.ratio_engine import BY_NAME, METRICS
 from core.trend_engine import horizontal
@@ -23,34 +24,50 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     """Create a clean, typed workbook for an official exchange price extract."""
     if history.empty:
         raise ValueError('Price history is empty.')
-    data = history.copy().sort_values('Date').reset_index(drop=True)
+    if not {'Date', 'Close'} <= set(history.columns):
+        raise ValueError('Price history needs Date and Close columns.')
+    data = history.copy()
     data['Date'] = pd.to_datetime(data['Date'])
+    if data['Date'].dt.tz is not None:
+        data['Date'] = data['Date'].dt.tz_localize(None)
+    if data['Date'].isna().any() or data['Date'].duplicated().any():
+        raise ValueError('Price history needs valid, unique trading dates.')
+    data = data.sort_values('Date').reset_index(drop=True)
     close = pd.to_numeric(data['Close'], errors='coerce')
+    if close.isna().any() or not close.map(lambda value: math.isfinite(value) and value > 0).all():
+        raise ValueError('Closing prices must be finite positive numbers.')
+    data['Close'] = close
+    if 'Volume' not in data:
+        data['Volume'] = float('nan')
+    data['Volume'] = pd.to_numeric(data['Volume'], errors='coerce')
     data['Daily Return'] = close.pct_change(fill_method=None)
     try:
-        fetched_display = pd.Timestamp(fetched_at).strftime('%d/%m/%Y %H:%M UTC')
+        fetched = pd.Timestamp(fetched_at)
+        if fetched.tzinfo is not None:
+            fetched = fetched.tz_convert('UTC')
+        fetched_display = fetched.strftime('%d/%m/%Y %H:%M UTC')
     except (TypeError, ValueError):
         fetched_display = fetched_at
     monthly = (data.set_index('Date').resample('ME')
                .agg(Close=('Close', 'last'), Average_Close=('Close', 'mean'),
-                    Trading_Days=('Close', 'count'), Volume=('Volume', 'sum'))
+                    Trading_Days=('Close', 'count'), Volume=('Volume', lambda values: values.sum(min_count=1)))
                .dropna(subset=['Close']).reset_index())
 
     book = Workbook()
     summary = book.active
     summary.title = 'Summary'
     summary.sheet_view.showGridLines = False
-    summary.append([f'{exchange} market history - {ticker}'])
+    summary.append([safe_cell(f'{exchange} market history - {ticker}')])
     summary.append(['Period', f'{data.Date.min():%d/%m/%Y} to {data.Date.max():%d/%m/%Y}'])
     summary.append(['Trading records', len(data)])
     summary.append(['First close', float(close.iloc[0])])
     summary.append(['Last close', float(close.iloc[-1])])
     summary.append(['Period return', float(close.iloc[-1] / close.iloc[0] - 1) if close.iloc[0] else None])
-    summary.append(['Total volume', float(pd.to_numeric(data.get('Volume'), errors='coerce').sum())])
+    summary.append(['Total volume', safe_cell(float(data['Volume'].sum(min_count=1)))])
     summary.append([])
     summary.append(['Use', 'Official exchange values arranged for filtering, charting and further analysis.'])
-    summary.append(['Source', source_url])
-    summary.append(['Fetched at (UTC)', fetched_display])
+    summary.append(['Source', safe_cell(source_url)])
+    summary.append(['Fetched at (UTC)', safe_cell(fetched_display)])
     summary.append(['Caution', 'Exchange website data may be delayed, corrected, unavailable or reformatted. Verify material decisions at the source.'])
     summary['A1'].font = Font(size=16, bold=True, color=NAVY)
     for cell in summary['A']:
@@ -64,7 +81,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     prices = book.create_sheet('Price History')
     prices.sheet_view.showGridLines = False
     headers = list(data.columns)
-    prices.append(headers)
+    prices.append([safe_cell(header) for header in headers])
     for row in data.itertuples(index=False, name=None):
         prices.append([v.to_pydatetime() if isinstance(v, pd.Timestamp) else safe_cell(v) for v in row])
     prices.freeze_panes = 'A2'
@@ -96,7 +113,7 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     month_headers = ['Month', 'Month-end Close', 'Average Close', 'Trading Days', 'Volume']
     month.append(month_headers)
     for row in monthly.itertuples(index=False, name=None):
-        month.append(list(row))
+        month.append([v.to_pydatetime() if isinstance(v, pd.Timestamp) else safe_cell(v) for v in row])
     month.freeze_panes = 'A2'
     for cell in month[1]:
         cell.fill = PatternFill('solid', fgColor=NAVY)
@@ -109,10 +126,10 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
     sources = book.create_sheet('Sources')
     sources.sheet_view.showGridLines = False
     sources.append(['Item', 'Details'])
-    sources.append(['Exchange', exchange])
-    sources.append(['Ticker', ticker])
-    sources.append(['Official source', source_url])
-    sources.append(['Fetched at (UTC)', fetched_display])
+    sources.append(['Exchange', safe_cell(exchange)])
+    sources.append(['Ticker', safe_cell(ticker)])
+    sources.append(['Official source', safe_cell(source_url)])
+    sources.append(['Fetched at (UTC)', safe_cell(fetched_display)])
     sources.append(['Method', 'Public exchange web page parsed by Falcon Finalysis; no price values are estimated.'])
     sources.append(['Refresh', 'Return to Listed Company Data and fetch the required date range again.'])
     for cell in sources[1]:
@@ -129,11 +146,14 @@ def market_data_workbook(history: pd.DataFrame, exchange: str, ticker: str, sour
 
 def safe_cell(value):
     """Neutralize Excel formula injection in user-provided metadata."""
-    if isinstance(value, str) and value[:1] in ['=', '+', '-', '@']:
-        return "'" + value
+    if isinstance(value, str):
+        value = ILLEGAL_CHARACTERS_RE.sub('', value)
+        if value.lstrip()[:1] in ['=', '+', '-', '@']:
+            return "'" + value
+        return value
     if value is None or not isinstance(value, (str, int, float, bool)) and pd.isna(value):
         return None
-    if isinstance(value, float) and pd.isna(value):
+    if isinstance(value, float) and not math.isfinite(value):
         return None
     return value
 
@@ -141,10 +161,10 @@ def safe_cell(value):
 def add_sheet(book: Workbook, title: str, df: pd.DataFrame, note: str = '', index: bool = True,
               percent: bool = False) -> None:
     ws = book.create_sheet(title)
-    ws.append([title])
+    ws.append([safe_cell(title)])
     ws.append([safe_cell(note)])
     headers = ([df.index.name or 'Metric'] if index else []) + [str(c) for c in df.columns]
-    ws.append(headers)
+    ws.append([safe_cell(header) for header in headers])
     for idx, row in df.iterrows():
         values = ([idx] if index else []) + list(row)
         ws.append([safe_cell(v) for v in values])
@@ -192,7 +212,7 @@ def input_template(frame: pd.DataFrame | None = None) -> bytes:
     ws = book.active
     ws.title = 'Financial Data'
     df = frame if frame is not None else pd.DataFrame({'Year': [2023, 2024, 2025]}).reindex(columns=['Year']+FIELDS)
-    ws.append(list(df.columns))
+    ws.append([safe_cell(column) for column in df.columns])
     for row in df.itertuples(index=False, name=None):
         ws.append([safe_cell(v) for v in row])
     for cell in ws[1]:
@@ -256,7 +276,7 @@ def exchange_input_template(frame: pd.DataFrame, details: pd.DataFrame, exchange
     """Add exchange-reported annual metrics to the canonical financial template."""
     book = load_workbook(BytesIO(input_template(frame)))
     ws = book.create_sheet('Exchange Data', 1)
-    ws.append([f'{exchange} annual values - {ticker}'])
+    ws.append([safe_cell(f'{exchange} annual values - {ticker}')])
     ws.append(['Only directly reported values are copied to Financial Data. Complete remaining fields from annual reports.'])
     ws.append(['Year', 'Exchange metric', 'Value', 'Unit', 'Source'])
     for row in details.itertuples(index=False, name=None):
@@ -279,7 +299,7 @@ def exchange_input_template(frame: pd.DataFrame, details: pd.DataFrame, exchange
                 ('Official source', source_url), ('Fetched at (UTC)', fetched_at),
                 ('Copied to Financial Data', 'Net Income when the exchange reports annual net profit in BDT million.'),
                 ('Still needed', 'Use annual reports to complete revenue, balance sheet, cash flow and other missing fields.')]:
-        sources.append(list(row))
+        sources.append([safe_cell(value) for value in row])
     for cell in sources[1]:
         cell.fill = PatternFill('solid', fgColor=NAVY)
         cell.font = Font(color='FFFFFF', bold=True)

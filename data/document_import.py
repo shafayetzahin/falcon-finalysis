@@ -7,11 +7,12 @@ from pathlib import Path
 import re
 import zipfile
 
+import numpy as np
 import pandas as pd
 from openpyxl import load_workbook
 
 from core.config import ALIASES, FIELDS
-from data.parsers import normalize
+from data.parsers import normalize, numeric_values
 
 
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -40,40 +41,60 @@ def _field(label: object) -> str | None:
     clean = normalize(str(label))
     if clean in LOOKUP:
         return LOOKUP[clean]
-    # Annual reports often add numbering, notes and qualifiers to the row name.
-    matches = [(len(alias), target) for alias, target in LOOKUP.items()
-               if len(alias) >= 4 and (alias in clean or clean in alias)]
-    return max(matches, default=(0, None))[1]
+    # Match complete labels after removing explicit note numbers/statement qualifiers.
+    # Substring matching confuses non-current assets with current assets, and cash
+    # flow rows with cash balances.
+    text = str(label).strip().lower()
+    text = re.sub(r"\([^)]*\b(?:note|notes)\b[^)]*\)", "", text)
+    text = re.sub(r"^\s*(?:\d+[.)]?\s+|(?:consolidated|standalone|group)\s+)", "", text)
+    text = re.sub(r"\s+(?:note\s*)?\d+(?:\.\d+)?\s*$", "", text)
+    clean = normalize(text)
+    extra = {
+        "netcashfromoperatingactivities": "Operating Cash Flow",
+        "netcashgeneratedfromoperatingactivities": "Operating Cash Flow",
+        "netcashprovidedbyoperatingactivities": "Operating Cash Flow",
+        "netcashusedinoperatingactivities": "Operating Cash Flow",
+    }
+    return LOOKUP.get(clean, extra.get(clean))
 
 
 def _amount(value: object) -> float | None:
     if value is None or pd.isna(value):
         return None
-    text = str(value).strip().replace(",", "").replace("৳", "").replace("$", "")
+    text = str(value).strip().replace("৳", "").replace("$", "")
     if text in {"", "-", "—", "–", "n/a", "N/A"}:
         return None
-    if text.startswith("(") and text.endswith(")"):
-        text = "-" + text[1:-1]
-    text = re.sub(r"[^0-9.\-]", "", text)
+    text = re.sub(r"^(?:BDT|Tk\.?|Taka)\s*", "", text, flags=re.I)
     try:
-        return float(text) if text not in {"", "-", "."} else None
-    except ValueError:
+        value = float(numeric_values(pd.Series([text])).iloc[0])
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
         return None
 
 
 def _extract_rows(rows: list[list[object]], source: str) -> tuple[list[dict], list[dict]]:
-    records: dict[int, dict] = {}
+    records: list[dict] = []
     evidence: list[dict] = []
-    for header_i, row in enumerate(rows):
-        positions: list[tuple[int, int]] = []
+    def positions_for(row):
+        if row and _field(row[0]):
+            return []
+        positions = []
         for col_i, value in enumerate(row):
-            match = YEAR_RE.search(str(value or ""))
-            if match:
+            text = str(value or "").strip()
+            match = YEAR_RE.search(text)
+            # A year header may include a calendar date, but not a financial amount.
+            if col_i > 0 and match and (text == match.group() or re.search(r"[A-Za-z/\-]", text)):
                 positions.append((col_i, int(match.group())))
+        return positions
+    for header_i, row in enumerate(rows):
+        positions = positions_for(row)
         if not positions:
             continue
-        for data_row in rows[header_i + 1:header_i + 55]:
-            label = next((x for x in data_row[:max(p[0] for p in positions)] if str(x or "").strip()), None)
+        for data_row in rows[header_i + 1:]:
+            if positions_for(data_row):
+                break
+            candidates = [x for x in data_row[:min(p[0] for p in positions)] if str(x or "").strip()]
+            label = next((x for x in candidates if _field(x)), None)
             target = _field(label) if label is not None else None
             if not target:
                 continue
@@ -83,24 +104,34 @@ def _extract_rows(rows: list[list[object]], source: str) -> tuple[list[dict], li
                 value = _amount(data_row[col_i])
                 if value is None:
                     continue
-                records.setdefault(year, {"Year": year})[target] = value
+                records.append({"Year": year, target: value})
                 evidence.append({"Year": year, "Falcon Finalysis field": target,
                                  "Source label": str(label).strip(), "Value": value, "Source": source})
-        if records:
-            break
-    return list(records.values()), evidence
+    return records, evidence
 
 
 def _extract_text_rows(text: str, source: str) -> tuple[list[dict], list[dict]]:
     """Fallback for visually aligned PDF tables without drawn cell borders."""
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
-    for header_i, line in enumerate(lines):
+    def header_years(line):
         years = [int(x) for x in YEAR_RE.findall(line)]
         if not years:
+            return []
+        prefix = YEAR_RE.sub('', line).strip()
+        # Financial amount rows that happen to contain 2025 are not year headers.
+        if prefix and not re.search(r'\b(?:year|years|ended|metric|particulars|amounts|description)\b',
+                                    prefix, re.I):
+            return []
+        return years
+    all_records, all_evidence = [], []
+    for header_i, line in enumerate(lines):
+        years = header_years(line)
+        if not years:
             continue
-        records = {year: {"Year": year} for year in years}
         evidence = []
-        for item in lines[header_i + 1:header_i + 55]:
+        for item in lines[header_i + 1:]:
+            if header_years(item):
+                break
             tokens = item.split()
             if len(tokens) <= len(years):
                 continue
@@ -112,12 +143,12 @@ def _extract_text_rows(text: str, source: str) -> tuple[list[dict], list[dict]]:
             if not target:
                 continue
             for year, value in zip(years, values):
-                records[year][target] = value
+                all_records.append({"Year": year, target: value})
                 evidence.append({"Year": year, "Falcon Finalysis field": target, "Source label": label,
                                  "Value": value, "Source": source})
         if evidence:
-            return list(records.values()), evidence
-    return [], []
+            all_evidence.extend(evidence)
+    return all_records, all_evidence
 
 
 def _combine(parts: list[Extraction]) -> Extraction:
@@ -140,13 +171,20 @@ def _combine(parts: list[Extraction]) -> Extraction:
     if conflicts:
         notes.append(f"{conflicts} duplicate year/field value(s) differed; the first extracted value is shown. Review before import.")
     hints = [p.unit_hint for p in parts if p.unit_hint != "Unknown"]
-    return Extraction(frame, evidence, hints[0] if len(set(hints)) == 1 else "Unknown", notes)
+    if len(set(hints)) > 1:
+        raise ValueError("The statement sources use different units. Upload them separately and confirm units before combining.")
+    unit_hint = parts[0].unit_hint if len({p.unit_hint for p in parts}) == 1 else "Unknown"
+    if hints and unit_hint == "Unknown":
+        notes.append("Some source units could not be identified. Confirm every source uses the same units before scaling.")
+    return Extraction(frame, evidence, unit_hint, notes)
 
 
 def extract_pdfs(files: list[tuple[bytes, str]]) -> Extraction:
     """Extract candidates from text-based PDF tables; values always require review."""
     import pdfplumber
 
+    if len(files) > 10 or sum(len(payload) for payload, _ in files) > 100 * 1024 * 1024:
+        raise ValueError("Upload at most 10 PDFs totaling no more than 100 MB.")
     parts: list[Extraction] = []
     for payload, filename in files:
         if not payload or len(payload) > 40 * 1024 * 1024:
@@ -199,10 +237,13 @@ def extract_workbook(payload: bytes, filename: str) -> Extraction:
         parts = []
         try:
             for ws in book.worksheets:
-                if ws.max_row > 500 or ws.max_column > 100:
+                if (ws.max_row and ws.max_row > 500 or ws.max_column and ws.max_column > 100):
                     continue
+                ws.reset_dimensions()
                 rows = []
                 for row in ws.iter_rows():
+                    if len(rows) >= 500 or len(row) > 100:
+                        raise ValueError("Use at most 500 statement rows and 100 columns per worksheet.")
                     if any(cell.data_type == "f" for cell in row):
                         raise ValueError("Formula cells are not accepted. Paste values into a copy before upload.")
                     rows.append([cell.value for cell in row])
@@ -223,6 +264,8 @@ def extract_workbook(payload: bytes, filename: str) -> Extraction:
 
 
 def apply_scale(frame: pd.DataFrame, multiplier: float) -> pd.DataFrame:
+    if not np.isfinite(float(multiplier)) or float(multiplier) <= 0:
+        raise ValueError("Choose a finite, positive unit multiplier.")
     out = frame.copy()
     out[FIELDS] = out[FIELDS].apply(pd.to_numeric, errors="coerce") * float(multiplier)
     return out

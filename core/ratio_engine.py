@@ -94,6 +94,13 @@ BY_NAME = {m.name: m for m in METRICS}
 
 def calculate(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return numeric results and parallel reasons. Source data is never mutated."""
+    if 'Year' not in frame:
+        raise ValueError('Ratio analysis needs a Year column.')
+    if frame['Year'].duplicated().any():
+        raise ValueError('Duplicate fiscal years must be resolved before ratio analysis.')
+    if frame.empty:
+        empty = pd.DataFrame(columns=[metric.name for metric in METRICS], index=pd.Index([], name='Year'))
+        return empty.copy(), empty.copy()
     df = frame.set_index('Year').reindex(columns=FIELDS).astype(float).sort_index()
     for key in ['Total Assets', 'Shareholders Equity', 'Inventory', 'Accounts Receivable', 'Accounts Payable']:
         avg = (df[key] + df[key].shift()) / 2
@@ -116,6 +123,8 @@ def calculate(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                 reason = 'Denominator must be positive for a meaningful conventional ratio.'
             elif metric.name in ['Book Value Per Share', 'Long-Term Debt to Capital'] and context['Shareholders Equity'] <= 0:
                 reason = 'Equity must be positive.'
+            elif metric.name == 'P/E Ratio' and context['Market Price Per Share'] <= 0:
+                reason = 'Market price must be positive.'
             value = np.nan if reason else n / d
             if not np.isfinite(value) and not reason:
                 reason = 'Result exceeds the supported numeric range.'

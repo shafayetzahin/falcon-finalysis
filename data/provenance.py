@@ -19,7 +19,8 @@ def provenance_for_frame(frame: pd.DataFrame, source_type: str, reference: str) 
 
 
 def provenance_from_evidence(evidence: pd.DataFrame, source_type: str = "Annual report extraction",
-                             accepted_frame: pd.DataFrame | None = None) -> pd.DataFrame:
+                             accepted_frame: pd.DataFrame | None = None,
+                             multiplier: float = 1.0) -> pd.DataFrame:
     recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = []
     for _, row in evidence.iterrows():
@@ -27,15 +28,34 @@ def provenance_from_evidence(evidence: pd.DataFrame, source_type: str = "Annual 
                      str(row.get("Source", "")), recorded_at])
     result = pd.DataFrame(rows, columns=PROVENANCE_COLUMNS).drop_duplicates(["Year", "Field"], keep="first")
     if accepted_frame is not None:
-        accepted = {(int(row['Year']), field) for _, row in accepted_frame.iterrows()
+        accepted = {(int(row['Year']), field): float(value) for _, row in accepted_frame.iterrows()
                     for field, value in row.items() if field != 'Year' and pd.notna(value)}
-        result = result[result.apply(lambda row: (int(row['Year']), row['Field']) in accepted, axis=1)]
+        originals = {(int(row['Year']), str(row['Falcon Finalysis field'])): row
+                     for _, row in evidence.iloc[::-1].iterrows()}
+        rows = []
+        for (year, field), value in accepted.items():
+            original = originals.get((year, field))
+            reference = str(original.get('Source', '')) if original is not None else 'Review editor'
+            same_value = (original is not None and pd.notna(original.get('Value'))
+                          and float(original['Value']) * multiplier == value)
+            kind = source_type if same_value else 'Manual entry'
+            if not same_value:
+                reference = 'Reviewed extraction editor; original evidence: ' + reference
+            elif multiplier != 1:
+                reference += f'; applied unit multiplier: {multiplier:g}'
+            rows.append([year, field, kind, reference, recorded_at])
+        result = pd.DataFrame(rows, columns=PROVENANCE_COLUMNS)
     return result.reset_index(drop=True)
 
 
-def merge_provenance(current: pd.DataFrame | None, incoming: pd.DataFrame) -> pd.DataFrame:
+def merge_provenance(current: pd.DataFrame | None, incoming: pd.DataFrame,
+                     accepted_frame: pd.DataFrame | None = None) -> pd.DataFrame:
     base = current if isinstance(current, pd.DataFrame) else pd.DataFrame(columns=PROVENANCE_COLUMNS)
     combined = pd.concat([base, incoming], ignore_index=True).drop_duplicates(["Year", "Field"], keep="last")
+    if accepted_frame is not None and not combined.empty:
+        accepted = {(int(row['Year']), field) for _, row in accepted_frame.iterrows()
+                    for field, value in row.items() if field != 'Year' and pd.notna(value)}
+        combined = combined[combined.apply(lambda row: (int(row['Year']), row['Field']) in accepted, axis=1)]
     return combined.reindex(columns=PROVENANCE_COLUMNS).sort_values(["Year", "Field"]).reset_index(drop=True)
 
 

@@ -4,7 +4,7 @@ import logging
 import streamlit as st
 from data.demo import demo_company, DEMO_META
 from data.provenance import provenance_for_frame
-from components.ui import hosted_mode, repository, storage_notice
+from components.ui import hosted_mode, repository, storage_notice, reset_company_outputs
 from components.accounts import require_account
 from core.i18n import nav_label, workflow_guide
 
@@ -47,10 +47,12 @@ def load_demo() -> None:
     st.session_state.meta = DEMO_META.copy()
     st.session_state.project_id = None
     st.session_state.project_name = 'Apex • FY2021–FY2025'
-    st.session_state.pop('scenario', None)
-    for key in list(st.session_state):
-        if key.startswith('driver_'):
-            del st.session_state[key]
+    reset_company_outputs()
+
+
+if st.session_state.pop('open_demo_request', False):
+    load_demo()
+    st.session_state.open_demo_overview = True
 
 
 with st.sidebar:
@@ -86,6 +88,8 @@ with st.sidebar:
                 st.session_state.project_id = project_id
                 st.session_state.meta['updated_at'] = repository().open(project_id)[0]['updated_at']
                 st.success('Project saved. ' + storage_notice())
+            except ValueError as exc:
+                st.error(str(exc))
             except Exception:
                 logging.exception('Saving project failed')
                 st.error('Could not save. Check that the project folder is writable and the inputs are valid.')
@@ -97,6 +101,7 @@ with st.sidebar:
 
 if st.session_state.get('dark'):
     st.markdown('''<style>
+    :root{--ff-ink:#EAF1F8;--ff-muted:#A9B9CA;--ff-line:#2A4058;--ff-surface:#112238;--ff-bg:#091321}
     .stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{background:#091321!important;color:#EAF1F8!important}
     [data-testid="stSidebar"]{background:#0E1D30!important;border-color:#263A51!important;color:#EAF1F8!important}
     [data-testid="stSidebar"] p,[data-testid="stSidebar"] a,[data-testid="stSidebar"] h2,
@@ -116,6 +121,16 @@ if st.session_state.get('dark'):
     .stButton button,.stDownloadButton button,.stLinkButton a,[data-testid="stSidebar"] button{background:#173859!important;color:#F3F8FC!important;border-color:#3B5875!important}
     .stButton button:hover,.stDownloadButton button:hover{background:#205071!important;border-color:#4E7599!important}
     .stButton button p,.stDownloadButton button p,[data-testid="stExpander"] summary{color:#F3F8FC!important}
+    [data-baseweb="input"] input,[data-baseweb="select"] input,textarea{color:#EAF1F8!important;background:#101F33!important}
+    [data-testid="stSelectbox"] [role="group"],[data-testid="stSelectbox"] [role="combobox"]{background:#101F33!important;color:#EAF1F8!important;border-color:#31475F!important}
+    button[aria-label^="Help for"]{background:transparent!important;border-color:transparent!important}
+    button[aria-label^="Help for"] svg{stroke:#B9C9D9!important}
+    [role="listbox"],[role="option"],[data-baseweb="popover"]{background:#112238!important;color:#EAF1F8!important}
+    [role="option"] *{color:#EAF1F8!important}
+    [role="option"][aria-selected="true"]{background:#12434B!important}
+    [role="dialog"],[role="dialog"] [data-testid="stVerticalBlock"]{background:#112238!important;color:#EAF1F8!important}
+    [data-testid="stAlert"]{background:#142B40!important;border:1px solid #36536A!important}
+    [data-testid="stAlert"] [data-testid="stMarkdownContainer"] p{color:#EAF1F8!important}
     </style>''', unsafe_allow_html=True)
 
 sections = {

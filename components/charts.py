@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 import pandas as pd
 
 COLORS = ['#008C95', '#173859', '#5A8DDA', '#CF9650', '#A36394']
+DARK_COLORS = ['#42D4D7', '#7DBEF2', '#A9A5FF', '#F0BC6F', '#E9A1D1']
 
 
 def line_chart(df: pd.DataFrame, columns: list[str], title: str, unit: str = '', dark: bool = False) -> go.Figure:
@@ -10,7 +11,7 @@ def line_chart(df: pd.DataFrame, columns: list[str], title: str, unit: str = '',
     for i, col in enumerate(columns):
         values = df[col] * (100 if unit == '%' else 1/1e6 if unit == 'millions' else 1)
         fig.add_trace(go.Scatter(x=[str(int(y)) for y in df.index], y=values, name=col,
-                                 mode='lines+markers', line=dict(color=COLORS[i % len(COLORS)], width=3),
+                                 mode='lines+markers', line=dict(color=(DARK_COLORS if dark else COLORS)[i % len(COLORS)], width=3),
                                  marker=dict(size=7), connectgaps=False,
                                  hovertemplate='%{x}<br>%{y:,.2f} ' + unit + '<extra>%{fullData.name}</extra>'))
     fig.update_layout(title=title, height=340, template='plotly_dark' if dark else 'plotly_white',

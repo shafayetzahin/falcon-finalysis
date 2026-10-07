@@ -5,17 +5,14 @@ from components.ui import require_analysis, header, metrics, chart, signal_card,
 
 if 'frame' not in st.session_state:
     header('Financial analysis made easier.', 'Choose one starting point. Falcon Finalysis will guide you through review, analysis and export.')
-    st.markdown('### Start here')
+    if st.button('Try a complete demo', type='primary'):
+        st.session_state.open_demo_request = True
+        st.rerun()
+    st.markdown('### Choose your task')
     items = [
-        ('01 · Try the demo', 'See a complete five-year analysis before using your own data.', None),
-        ('02 · DSE/CSE company', 'Enter a ticker, collect public company data and create a prefilled template.', 'pages/market.py'),
-        ('03 · Upload statements', 'Use PDF, Excel or CSV. Extracted values always receive a review step.', 'pages/projects.py'),
-        ('04 · Enter manually', 'Create a company and enter 3–10 annual periods in the editor.', 'pages/projects.py'),
-        ('05 · Build a portfolio', 'Compare selected stocks, corporate actions, returns and risk.', 'pages/portfolio.py'),
-        ('06 · Review small-business credit', 'Use consented transaction evidence for an explainable CredGrid analysis.', 'pages/credgrid.py'),
-        ('07 · Check data quality', 'Find gaps, unusual values, reconciliation issues and missing source references.', 'pages/data_quality.py'),
-        ('08 · Build a valuation', 'Use reviewed statements for WACC, ROIC, DCF sensitivity and trading comps.', 'pages/valuation.py'),
-        ('09 · Compare an industry', 'Pick an anchor ticker, choose suggested peers, or upload company statements.', 'pages/industry_comparison.py'),
+        ('Analyze a company', 'Start with a DSE/CSE ticker, collect public facts and review the available financial data.', 'pages/market.py'),
+        ('Compare companies', 'Choose suggested industry peers or upload statements, then compare the same fiscal year.', 'pages/industry_comparison.py'),
+        ('Manage a portfolio', 'Review stock prices, corporate actions, holdings, returns and risk.', 'pages/portfolio.py'),
     ]
     for start in range(0, len(items), 3):
         cols = st.columns(3)
@@ -25,7 +22,12 @@ if 'frame' not in st.session_state:
                 st.write(text)
                 if page:
                     st.page_link(page, label='Open →')
-    st.info('For the guided example, choose **Load Demo Company** in the sidebar. Uploaded statements are processed only in the current application session.')
+    st.page_link('pages/projects.py', label='Upload PDF, Excel or CSV statements — or enter figures manually →')
+    with st.expander('More analysis tools'):
+        st.page_link('pages/data_quality.py', label='Check source coverage and data quality')
+        st.page_link('pages/valuation.py', label='Build a valuation from reviewed statements')
+        st.page_link('pages/credgrid.py', label='Review small-business credit with CredGrid')
+    st.info('Start with the fictional demo to learn the workflow. For your own company, review the source values before using results and download a project recovery copy.')
     st.markdown('### What happens next')
     st.write('**Review data quality → understand ratios and trends → investigate risks → test a scenario → download PDF and Excel reports.**')
     st.stop()

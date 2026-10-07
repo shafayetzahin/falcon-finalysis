@@ -5,7 +5,7 @@ import pandas as pd
 
 
 def dupont(frame: pd.DataFrame, ratios: pd.DataFrame) -> pd.DataFrame:
-    df = frame.set_index('Year')
+    df = frame.set_index('Year').sort_index()
     assets = (df['Total Assets'] + df['Total Assets'].shift()) / 2
     equity = (df['Shareholders Equity'] + df['Shareholders Equity'].shift()) / 2
     assets.iloc[0], equity.iloc[0] = df['Total Assets'].iloc[0], df['Shareholders Equity'].iloc[0]

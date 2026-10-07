@@ -34,6 +34,7 @@ def analyze(frame: pd.DataFrame, tolerance: float = .01) -> Analysis:
     if errors:
         raise ValueError(' '.join(errors))
     frame = frame.reindex(columns=['Year'] + FIELDS).sort_values('Year').copy()
+    frame['Year'] = pd.to_numeric(frame['Year']).astype(int)
     ratios, reasons = calculate(frame)
     statements = frame.set_index('Year').astype(float)
     combined = pd.concat([statements, ratios], axis=1)

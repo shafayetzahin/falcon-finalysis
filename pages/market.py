@@ -3,7 +3,7 @@ from datetime import date, timedelta, datetime, timezone
 import streamlit as st
 import pandas as pd
 
-from components.ui import header
+from components.ui import header, reset_company_outputs
 from core.config import FIELDS
 from data.database import stamp
 from data.provenance import provenance_for_frame
@@ -57,7 +57,7 @@ def start_project(company, frame: pd.DataFrame) -> None:
         frame, f'{exchange} exchange', company.source_url)
     st.session_state.project_name = f'{ticker} financial analysis'
     st.session_state.project_id = None
-    st.session_state.pop('scenario', None)
+    reset_company_outputs()
     st.switch_page('pages/projects.py')
 
 

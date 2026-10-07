@@ -8,16 +8,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from io import StringIO
-from io import BytesIO
 import json
 from pathlib import Path
 import re
 import ssl
+from lxml import html as lxml_html
+import numpy as np
 
 import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from core.config import FIELDS
+from data.parsers import numeric_values, parse_date, read_tabular
 
 
 # DSE's redesigned site moved the original company and archive views to the
@@ -104,24 +106,39 @@ def _dates(start: date, end: date) -> tuple[str, str]:
 
 
 def _request(method: str, url: str, session: requests.Session | None = None, **kwargs) -> requests.Response:
+    owned_session = session is None
+    response = None
     try:
         session = _verified_exchange_session(url, session) or session
         caller = session.request if session else requests.request
         request_headers = {**HEADERS, **kwargs.pop("headers", {})}
-        response = caller(method, url, headers=request_headers, timeout=(8, 30), **kwargs)
+        response = caller(method, url, headers=request_headers, timeout=(8, 30), stream=True, **kwargs)
         response.raise_for_status()
-        if len(response.content) > MAX_RESPONSE:
-            raise ValueError("The exchange returned more data than Falcon Finalysis can safely process at once.")
+        chunks, size = [], 0
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            size += len(chunk)
+            if size > MAX_RESPONSE:
+                raise ValueError("The exchange returned more data than Falcon Finalysis can safely process at once.")
+            chunks.append(chunk)
+        response._content = b"".join(chunks)
+        response._content_consumed = True
         return response
     except requests.exceptions.SSLError as exc:
         raise ValueError("Secure connection to the exchange failed. Check the computer's date and trusted certificates, then retry.") from exc
     except requests.RequestException as exc:
         raise ValueError("The exchange site is unavailable or rejected the request. Retry later or use the spreadsheet upload fallback.") from exc
+    finally:
+        if response is not None:
+            response.close()
+        if owned_session and session is not None:
+            session.close()
 
 
 def ticker_catalog(exchange: str) -> dict[str, str]:
     """Return official ticker codes mapped to exchange-provided company names."""
     exchange = exchange.upper()
+    if exchange not in {"DSE", "CSE"}:
+        raise ValueError("Exchange must be DSE or CSE.")
     url = f"{DSE}/data_archive.php" if exchange == "DSE" else f"{CSE}/market/marketprice"
     html = _request("GET", url).text
     options = re.findall(r"<option[^>]+value=[\"']([^\"']+)[\"'][^>]*>(.*?)</option>", html, re.I | re.S)
@@ -188,6 +205,38 @@ def _pairs(tables: list[pd.DataFrame]) -> dict[str, str]:
     return fields
 
 
+def _cse_fields(html: str, tables: list[pd.DataFrame], ticker: str) -> dict[str, str]:
+    """Read verified CSE identity and scalar fields; exclude structured tables."""
+    page = lxml_html.fromstring(html)
+    title = page.xpath("//*[contains(concat(' ', normalize-space(@class), ' '), ' com_title ')]")
+    details = page.xpath("//*[contains(concat(' ', normalize-space(@class), ' '), ' com_details ')]//b")
+    identity = {}
+    for index, element in enumerate(details[:-1]):
+        label = element.text_content().strip().rstrip(':').strip()
+        if label in {'Trading Code', 'Scrip Code'}:
+            identity[label] = details[index + 1].text_content().strip()
+    if identity.get('Trading Code', '').upper() != ticker:
+        raise ValueError('CSE did not confirm the requested trading code. Retry or use the upload fallback.')
+    name = title[0].text_content().strip() if title else ''
+    if not name:
+        raise ValueError('CSE did not include a readable company name.')
+    allowed = {
+        'Last Trade Price (LTP)', 'Last Trade Date', 'Change', 'Open Price', "Day's Range",
+        'Total Trade', 'Total Volume', 'Close Price', 'Yesterday Close Price',
+        'Market Capital in BDT (mn)', 'Authorized Capital in BDT* (mn)',
+        'Paid-up Capital in BDT* (mn)', 'Face Value', 'Paid up Share', 'Market Lot',
+        'Sector', 'Market Category', 'Listing Year', 'AGM Date', 'Record Date',
+        'Dividend(%)', 'Bonus Issue', 'HY Net Turnover(mn)', 'HY Net Profit after tax(mn)',
+        'HY EPS', 'Year End', 'Financial Year End',
+    }
+    fields = {'Company Name': name, **identity}
+    for key, value in _pairs(tables).items():
+        label = key.strip().rstrip(':').strip()
+        if label in allowed:
+            fields[label] = _display_date(value) if label in {'Last Trade Date', 'AGM Date', 'Record Date'} else value
+    return fields
+
+
 def _modern_dse_company(html: str) -> dict:
     """Decode the official current DSE page's server-rendered company object."""
     match = re.search(r'\\"company\\":(\{.*?\}),\\"series\\":', html, re.S)
@@ -209,12 +258,12 @@ def _display_number(value: object, scale: float = 1.0) -> str:
         number = float(value) / scale
     except (TypeError, ValueError):
         return str(value)
-    return f"{number:,.2f}"
+    return f"{number:,.2f}" if np.isfinite(number) else ""
 
 
 def _display_date(value: object, include_time: bool = False) -> str:
     text = str(value or "").strip()
-    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y"):
+    for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d-%m-%Y", "%d %B, %Y", "%d %b, %Y"):
         try:
             parsed = datetime.strptime(text, pattern)
             return parsed.strftime("%d/%m/%Y %H:%M:%S" if include_time and "%H" in pattern
@@ -274,6 +323,7 @@ def company_snapshot(exchange: str, ticker: str) -> CompanySnapshot:
         try:
             response = _request("GET", current_url)
             company = _modern_dse_company(response.text)
+            _check_company_ticker(company, ticker)
             fields = _modern_dse_fields(company)
             return CompanySnapshot(exchange, ticker, str(company["name"]), fields, response.url,
                                    datetime.now(timezone.utc).replace(microsecond=0).isoformat())
@@ -285,7 +335,7 @@ def company_snapshot(exchange: str, ticker: str) -> CompanySnapshot:
         raise ValueError("Exchange must be DSE or CSE.")
     html = _request("GET", url).text
     tables = _tables(html)
-    fields = _pairs(tables)
+    fields = _cse_fields(html, tables, ticker) if exchange == 'CSE' else _pairs(tables)
     if not fields:
         raise ValueError(f"No company details were found for {ticker} on {exchange}.")
     heading = re.search(r"Company Name:\s*<i>(.*?)</i>", html, re.I | re.S)
@@ -298,6 +348,11 @@ def company_snapshot(exchange: str, ticker: str) -> CompanySnapshot:
 def _year(value: object) -> int | None:
     match = re.fullmatch(r"(?:19|20)\d{2}", str(value).strip())
     return int(match.group()) if match else None
+
+
+def _check_company_ticker(company: dict, ticker: str) -> None:
+    if str(company.get("code", "")).strip().upper() != ticker:
+        raise ValueError("The exchange returned a different company. Retry or use the upload fallback.")
 
 
 def _annual_metrics(tables: list[pd.DataFrame], source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -327,8 +382,19 @@ def _annual_metrics(tables: list[pd.DataFrame], source: str) -> tuple[pd.DataFra
                 year = _year(table.iloc[row_i, 0])
                 selected = None
                 for col_i in columns:
-                    value = _number(pd.Series([table.iloc[row_i, col_i]])).iloc[0]
-                    if pd.notna(value) and (value != 0 or metric in {"Dividend", "Dividend Yield"}):
+                    cell = table.iloc[row_i, col_i]
+                    if metric == 'Dividend' and isinstance(cell, str):
+                        marked = re.fullmatch(r'\s*(\d+(?:\.\d+)?)\s*%\s*([CB])\s*', cell, re.I)
+                        if marked:
+                            observations.append({
+                                'Year': year,
+                                'Exchange metric': 'Cash Dividend' if marked[2].upper() == 'C' else 'Stock Dividend',
+                                'Value': float(marked[1]), 'Unit': '%', 'Source': source})
+                            break
+                    if unit == "%" and isinstance(cell, str):
+                        cell = cell.strip().removesuffix("%").strip()
+                    value = _number(pd.Series([cell])).iloc[0]
+                    if pd.notna(value) and np.isfinite(value):
                         selected = float(value)
                         break
                 if selected is not None:
@@ -352,9 +418,13 @@ def _annual_metrics(tables: list[pd.DataFrame], source: str) -> tuple[pd.DataFra
 def _modern_dse_annual_metrics(company: dict, source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convert directly reported current-site annual metrics to the existing review table."""
     observations: list[dict] = []
-    dividends = {int(item["year"]): item for item in company.get("dividendHistory", [])
+    dividend_history = company.get("dividendHistory", []) or []
+    annual_history = company.get("multiYearFinancials", []) or []
+    if not isinstance(dividend_history, list) or not isinstance(annual_history, list):
+        raise ValueError("DSE's current company page returned an unexpected annual financial layout.")
+    dividends = {int(item["year"]): item for item in dividend_history
                  if isinstance(item, dict) and _year(item.get("year"))}
-    for item in company.get("multiYearFinancials", []):
+    for item in annual_history:
         if not isinstance(item, dict) or not (year := _year(item.get("year"))):
             continue
         metrics = [
@@ -364,12 +434,18 @@ def _modern_dse_annual_metrics(company: dict, source: str) -> tuple[pd.DataFrame
         ]
         dividend = dividends.get(year)
         if dividend:
-            cash, stock = dividend.get("cash"), dividend.get("stock")
-            if cash is not None or stock is not None:
-                metrics.append(("Dividend", "%", float(cash or 0) + float(stock or 0)))
+            cash = _number(pd.Series([dividend.get("cash")])).iloc[0]
+            stock = _number(pd.Series([dividend.get("stock")])).iloc[0]
+            if pd.notna(cash):
+                metrics.append(("Cash Dividend", "%", cash))
+            if pd.notna(stock):
+                metrics.append(("Stock Dividend", "%", stock))
+            if pd.notna(cash) and pd.notna(stock):
+                metrics.append(("Dividend", "%", cash + stock))
             metrics.append(("Dividend Yield", "%", dividend.get("yieldPct")))
         for metric, unit, value in metrics:
-            if value is not None and value != "$undefined":
+            value = _number(pd.Series([value])).iloc[0]
+            if pd.notna(value) and np.isfinite(value):
                 observations.append({"Year": year, "Exchange metric": metric,
                                      "Value": float(value), "Unit": unit, "Source": source})
     if not observations:
@@ -392,8 +468,10 @@ def exchange_financials(exchange: str, ticker: str) -> ExchangeFinancials:
         current_url = f"{DSE_CURRENT}/company/{ticker}"
         try:
             response = _request("GET", current_url)
+            company = _modern_dse_company(response.text)
+            _check_company_ticker(company, ticker)
             frame, details = _modern_dse_annual_metrics(
-                _modern_dse_company(response.text), response.url)
+                company, response.url)
             return ExchangeFinancials(frame.tail(10).reset_index(drop=True), details, response.url,
                                       datetime.now(timezone.utc).replace(microsecond=0).isoformat())
         except ValueError:
@@ -403,16 +481,20 @@ def exchange_financials(exchange: str, ticker: str) -> ExchangeFinancials:
     if not url:
         raise ValueError("Exchange must be DSE or CSE.")
     response = _request("GET", url)
+    if exchange == 'CSE':
+        _cse_fields(response.text, _tables(response.text), ticker)
     frame, details = _annual_metrics(_tables(response.text), url)
     return ExchangeFinancials(frame.tail(10).reset_index(drop=True), details, url,
                               datetime.now(timezone.utc).replace(microsecond=0).isoformat())
 
 
 def _number(series: pd.Series) -> pd.Series:
-    text = series.astype("string").str.strip().str.replace(",", "", regex=False)
-    text = text.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
-    extracted = text.str.extract(r"([-+]?\d*\.?\d+)", expand=False)
-    return pd.to_numeric(extracted, errors="coerce")
+    return numeric_values(series)
+
+
+def _price_date(value: object) -> pd.Timestamp:
+    """Read daily dates explicitly; arbitrary numeric values are not timestamps."""
+    return parse_date(value)
 
 
 def _standardize_dse(table: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -422,16 +504,18 @@ def _standardize_dse(table: pd.DataFrame, ticker: str) -> pd.DataFrame:
     table.columns = [str(c).strip().upper() for c in table.columns]
     if not {"DATE", "TRADING CODE", "CLOSEP*", "VOLUME"}.issubset(table.columns):
         raise ValueError("DSE returned a page, but its price table format has changed.")
-    out = table.rename(columns=rename)[list(rename.values())].copy()
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out = table.rename(columns=rename)[[v for k, v in rename.items() if k in table]].copy()
+    out["Date"] = out["Date"].map(_price_date)
     out = out[out["Ticker"].astype(str).str.upper().eq(ticker)]
     for col in out.columns.difference(["Date", "Ticker"]):
         out[col] = _number(out[col])
-    return out.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    return out.sort_values("Date").reset_index(drop=True)
 
 
 def _modern_dse_history(html: str, ticker: str, start: date, end: date) -> pd.DataFrame:
     """Read the official current DSE company page's server-rendered price series."""
+    if r'\"company\":' in html:
+        _check_company_ticker(_modern_dse_company(html), ticker)
     match = re.search(r'\\"series\\":(\[.*?\]),\\"suggestedCode\\"', html, re.S)
     if not match:
         raise ValueError("DSE's current company page did not include a readable price series.")
@@ -446,14 +530,19 @@ def _modern_dse_history(html: str, ticker: str, start: date, end: date) -> pd.Da
     out = raw.rename(columns={"date": "Date", "price": "Close", "open": "Open",
                               "high": "High", "low": "Low", "trades": "Trades",
                               "volume": "Volume"})
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out["Date"] = out["Date"].map(_price_date)
+    if out["Date"].isna().any():
+        raise ValueError("DSE returned invalid dates in its price series.")
+    for column in ["Close", "Open", "High", "Low", "Trades", "Volume"]:
+        out[column] = _number(out[column])
+    out = out.sort_values("Date").reset_index(drop=True)
     out["Ticker"] = ticker
     out["LTP"] = out["Close"]
     out["Previous Close"] = out["Close"].shift(1)
     out["Value (mn)"] = pd.NA
     columns = ["Date", "Ticker", "Open", "High", "Low", "Close", "LTP",
                "Previous Close", "Trades", "Value (mn)", "Volume"]
-    out = out[columns].dropna(subset=["Date"])
+    out = out[columns]
     mask = out["Date"].dt.date.between(start, end)
     return out.loc[mask].sort_values("Date").reset_index(drop=True)
 
@@ -466,11 +555,11 @@ def _standardize_cse(table: pd.DataFrame, ticker: str) -> pd.DataFrame:
     rename = {"DATE": "Date", "CODE": "Ticker", "CLOSE PRICE": "Close", "VOLUME": "Volume",
               "TURNOVER": "Turnover", "NUMBER OF TRADE": "Trades", "COMPANY": "Company"}
     out = table.rename(columns=rename)[[rename[c] for c in rename if c in table.columns]].copy()
-    out["Date"] = pd.to_datetime(out["Date"], errors="coerce", dayfirst=False)
+    out["Date"] = out["Date"].map(_price_date)
     out = out[out["Ticker"].astype(str).str.upper().eq(ticker)]
     for col in out.columns.difference(["Date", "Ticker", "Company"]):
         out[col] = _number(out[col])
-    return out.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    return out.sort_values("Date").reset_index(drop=True)
 
 
 def price_history(exchange: str, ticker: str, start: date, end: date) -> tuple[pd.DataFrame, str]:
@@ -520,27 +609,31 @@ def price_history(exchange: str, ticker: str, start: date, end: date) -> tuple[p
         raise ValueError("Exchange must be DSE or CSE.")
     if frame.empty:
         raise ValueError("No trading records were found for this ticker and period.")
+    if frame["Date"].isna().any():
+        raise ValueError("The exchange returned invalid price dates. Use the upload fallback.")
+    frame = frame.loc[frame["Date"].dt.date.between(start, end)].copy()
+    if frame.empty:
+        raise ValueError("No trading records were found for this ticker and period.")
+    _validate_prices(frame)
     return frame, source
 
 
-def read_price_file(payload: bytes, filename: str, ticker: str = "") -> pd.DataFrame:
+def _validate_prices(frame: pd.DataFrame) -> None:
+    if frame[["Date", "Close", "Volume"]].isna().any().any():
+        raise ValueError("Every price row needs a valid Date, Close and Volume. Correct the missing or invalid values.")
+    if ((frame["Close"] <= 0) | (frame["Volume"] < 0)
+            | ~np.isfinite(frame[["Close", "Volume"]]).all(axis=1)).any():
+        raise ValueError("Closing prices must be positive and volume non-negative; infinite values are invalid.")
+    if frame.duplicated(["Ticker", "Date"]).any():
+        raise ValueError("Duplicate trading dates were found for this ticker. Resolve them before uploading.")
+
+
+def read_price_file(payload: bytes, filename: str, ticker: str = "", *,
+                    allow_multiple: bool = False) -> pd.DataFrame:
     """Read a manually downloaded price table when an exchange blocks live access."""
     if not payload or len(payload) > 10 * 1024 * 1024:
         raise ValueError("Use a non-empty CSV/XLSX file smaller than 10 MB.")
-    suffix = filename.lower().rsplit(".", 1)[-1]
-    try:
-        if suffix == "csv":
-            frame = pd.read_csv(BytesIO(payload), nrows=5001)
-        elif suffix == "xlsx":
-            frame = pd.read_excel(BytesIO(payload), nrows=5001)
-        else:
-            raise ValueError("Use a CSV or XLSX price-history file.")
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise ValueError("Unable to read this price-history file.") from exc
-    if len(frame) > 5000:
-        raise ValueError("Use at most 5,000 price rows per upload. Split the file into smaller periods.")
+    frame = read_tabular(payload, filename, max_rows=5000)
     aliases = {
         "date": "Date", "tradingcode": "Ticker", "tradecode": "Ticker", "code": "Ticker",
         "open": "Open", "openp": "Open", "high": "High", "low": "Low", "close": "Close",
@@ -554,28 +647,27 @@ def read_price_file(payload: bytes, filename: str, ticker: str = "") -> pd.DataF
     if frame.columns.duplicated().any():
         raise ValueError("Multiple columns map to the same price field. Keep one column per field.")
     # Slash dates follow the site's DD/MM/YYYY convention; ISO dates remain unambiguous.
-    frame["Date"] = frame["Date"].map(
-        lambda value: pd.to_datetime(value, errors="coerce", dayfirst="/" in str(value)))
+    frame["Date"] = frame["Date"].map(_price_date)
     if "Ticker" not in frame:
         if not ticker:
             raise ValueError("Enter a ticker because the uploaded file has no Ticker/Code column.")
         frame["Ticker"] = _ticker(ticker)
+    if frame["Ticker"].isna().any():
+        raise ValueError("Every price row needs a ticker. Correct the missing ticker values.")
     frame["Ticker"] = frame["Ticker"].astype(str).str.strip().str.upper()
     if ticker:
         frame = frame.loc[frame["Ticker"] == _ticker(ticker)].copy()
         if frame.empty:
             raise ValueError(f"The file contains no rows for {_ticker(ticker)}. Check the selected ticker.")
-    elif frame["Ticker"].nunique() != 1:
+    elif not allow_multiple and frame["Ticker"].nunique() != 1:
         raise ValueError("Choose a ticker before uploading a file containing multiple companies.")
-    for col in frame.columns.difference(["Date", "Ticker", "Company"]):
+    for value in frame["Ticker"].unique():
+        _ticker(value)
+    numeric_columns = {"Open", "High", "Low", "Close", "LTP", "Previous Close", "Trades",
+                       "Volume", "Value (mn)", "Turnover"}
+    for col in frame.columns.intersection(list(numeric_columns)):
         frame[col] = _number(frame[col])
-    if frame[["Date", "Close", "Volume"]].isna().any().any():
-        raise ValueError("Every price row needs a valid Date, Close and Volume. Correct the missing or invalid values.")
-    if ((frame["Close"] <= 0) | (frame["Volume"] < 0)
-            | frame[["Close", "Volume"]].isin([float('inf'), float('-inf')]).any(axis=1)).any():
-        raise ValueError("Closing prices must be positive and volume non-negative; infinite values are invalid.")
-    if frame.duplicated(["Ticker", "Date"]).any():
-        raise ValueError("Duplicate trading dates were found for this ticker. Resolve them before uploading.")
+    _validate_prices(frame)
     frame = frame.sort_values("Date").reset_index(drop=True)
     if frame.empty:
         raise ValueError("No usable dated closing prices were found.")

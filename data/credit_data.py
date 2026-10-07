@@ -1,12 +1,14 @@
 """Review-first transaction import for CredGrid AI."""
 from __future__ import annotations
 
-from io import BytesIO, StringIO
+from io import BytesIO
 import re
 
+import numpy as np
 import pandas as pd
 
 from core.credit_engine import TRANSACTION_COLUMNS
+from data.parsers import numeric_values, parse_date, read_tabular
 
 
 ALIASES = {
@@ -20,7 +22,7 @@ ALIASES = {
 }
 
 CATEGORY_RULES = {
-    "Business revenue": ["sale", "payment received", "marketplace", "customer", "cash deposit"],
+    "Business revenue": ["sale", "payment received", "marketplace", "customer"],
     "Inventory": ["inventory", "supplier", "stock purchase", "wholesale"],
     "Rent": ["rent", "lease"],
     "Utilities": ["utility", "electric", "internet", "mobile", "gas", "water"],
@@ -35,17 +37,19 @@ def _label(value: object) -> str:
 
 
 def _number(series: pd.Series) -> pd.Series:
-    text = series.astype("string").str.replace(",", "", regex=False).str.strip()
-    negative = text.str.match(r"^\(.*\)$", na=False)
-    text = text.str.replace(r"[()৳$€£]", "", regex=True)
-    values = pd.to_numeric(text, errors="coerce")
-    values.loc[negative] *= -1
-    return values
+    text = series.astype("string").str.replace(r"[৳$€£]", "", regex=True)
+    return numeric_values(text)
 
 
 def normalize_transactions(raw: pd.DataFrame, source: str) -> pd.DataFrame:
+    raw = raw.dropna(how="all")
     if raw.empty:
         raise ValueError("The transaction file is empty.")
+    labels = [_label(column) for column in raw.columns]
+    if len(labels) != len(set(labels)):
+        raise ValueError("Use unique transaction column headers.")
+    if len(raw) > 5000 or len(raw.columns) > 100:
+        raise ValueError("Use at most 5,000 transaction rows and 100 columns.")
     lookup = {_label(column): column for column in raw.columns}
     mapped = {}
     for target, aliases in ALIASES.items():
@@ -58,22 +62,40 @@ def normalize_transactions(raw: pd.DataFrame, source: str) -> pd.DataFrame:
     if "Amount" not in mapped and not ({"Credit", "Debit"} & set(mapped)):
         raise ValueError("Provide Amount, or Credit and Debit columns.")
     frame = pd.DataFrame()
-    frame["Date"] = pd.to_datetime(raw[mapped["Date"]], errors="coerce", dayfirst=True)
+    frame["Date"] = raw[mapped["Date"]].map(parse_date)
     frame["Description"] = (raw[mapped["Description"]].astype("string")
                             if "Description" in mapped else "")
+    numeric = {}
+    for target in ["Amount", "Credit", "Debit", "Balance"]:
+        if target not in mapped:
+            continue
+        source_values = raw[mapped[target]]
+        values = _number(source_values)
+        present = source_values.notna() & source_values.astype("string").str.strip().ne("")
+        if (present & (values.isna() | ~np.isfinite(values))).any():
+            raise ValueError(f"{target} contains invalid values. Use finite numbers, or blank for unavailable values.")
+        numeric[target] = values
     if "Amount" in mapped:
-        frame["Amount"] = _number(raw[mapped["Amount"]])
+        frame["Amount"] = numeric["Amount"]
     else:
-        credit = _number(raw[mapped["Credit"]]) if "Credit" in mapped else 0.0
-        debit = _number(raw[mapped["Debit"]]) if "Debit" in mapped else 0.0
+        credit = numeric["Credit"] if "Credit" in mapped else 0.0
+        debit = numeric["Debit"] if "Debit" in mapped else 0.0
+        for target in ["Credit", "Debit"]:
+            if target in numeric and (numeric[target] < 0).any():
+                raise ValueError("Credit and Debit must be non-negative. Use a signed Amount column for negative amounts.")
+        supplied = pd.concat([value.notna() for key, value in numeric.items()
+                              if key in {"Credit", "Debit"}], axis=1).any(axis=1)
+        if not supplied.all():
+            raise ValueError("Every transaction row needs Amount, Credit or Debit. Correct the missing values.")
         frame["Amount"] = pd.Series(credit, index=raw.index).fillna(0) - pd.Series(
             debit, index=raw.index).fillna(0)
-    frame["Balance"] = _number(raw[mapped["Balance"]]) if "Balance" in mapped else pd.NA
+    frame["Balance"] = numeric["Balance"] if "Balance" in mapped else pd.NA
     frame["Category"] = raw[mapped["Category"]].astype("string") if "Category" in mapped else "Unreviewed"
     frame["Source"] = source
-    frame = frame.dropna(subset=["Date", "Amount"])
-    frame = frame[frame["Amount"] != 0].sort_values("Date").reset_index(drop=True)
-    if frame.empty:
+    if frame[["Date", "Amount"]].isna().any().any():
+        raise ValueError("Every transaction row needs a valid Date and Amount. Correct the missing or invalid values.")
+    frame = frame.sort_values("Date", kind="stable").reset_index(drop=True)
+    if not (frame["Amount"] != 0).any():
         raise ValueError("No valid dated nonzero transactions were found.")
     return frame.reindex(columns=TRANSACTION_COLUMNS)
 
@@ -88,8 +110,16 @@ def suggest_transaction_categories(frame: pd.DataFrame) -> pd.DataFrame:
         if category and category.lower() not in {"unreviewed", "uncategorized"}:
             suggestions.append(category)
             continue
-        matched = next((name for name, terms in CATEGORY_RULES.items()
-                        if any(term in description for term in terms)), None)
+        positive = pd.to_numeric(amount, errors='coerce') > 0
+        if re.search(r'return|reversal|bounce|dishonou?r|failed', description):
+            matched = 'Returned payment'
+        elif re.search(r'loan|emi|installment|instalment|finance payment|debt repayment', description):
+            matched = 'Loan proceeds' if positive else 'Debt service'
+        elif re.search(r'owner|capital contribution|personal|gift|salary|transfer', description):
+            matched = 'Owner / personal transfer' if positive else 'Other outflow'
+        else:
+            matched = next((name for name, terms in CATEGORY_RULES.items()
+                            if any(term in description for term in terms)), None)
         if matched is None:
             matched = "Other inflow" if pd.to_numeric(amount, errors="coerce") > 0 else "Other outflow"
         suggestions.append(matched)
@@ -112,6 +142,7 @@ def evidence_checks(frame: pd.DataFrame) -> pd.DataFrame:
     debt = clean[(clean["Amount"] < 0) & clean["Category"].str.contains(
         r"debt|loan|emi|installment", case=False, regex=True)]
     uncategorized = clean["Category"].str.lower().isin(["", "unreviewed", "uncategorized"])
+    duplicates = clean.duplicated(["Date", "Description", "Amount", "Balance"], keep=False)
     return pd.DataFrame([
         {"Indicator": "Largest described inflow concentration", "Value": f"{concentration:.0%}",
          "Status": "REVIEW" if concentration > .50 else "OK",
@@ -125,32 +156,44 @@ def evidence_checks(frame: pd.DataFrame) -> pd.DataFrame:
         {"Indicator": "Unreviewed transaction categories", "Value": str(int(uncategorized.sum())),
          "Status": "REVIEW" if uncategorized.any() else "OK",
          "Reviewer note": "Review material categories before relying on expense and obligation totals."},
+        {"Indicator": "Potential duplicate transactions", "Value": str(int(duplicates.sum())),
+         "Status": "REVIEW" if duplicates.any() else "OK",
+         "Reviewer note": "Confirm repeated rows against statement references; identical legitimate transactions are retained."},
     ])
 
 
 def read_transaction_file(content: bytes, name: str, sheet: str | None = None) -> pd.DataFrame:
+    if not content or len(content) > 10 * 1024 * 1024:
+        raise ValueError("Use a non-empty statement smaller than 10 MB.")
     lower = name.lower()
-    if lower.endswith(".csv"):
-        raw = pd.read_csv(StringIO(content.decode("utf-8-sig")))
-        return normalize_transactions(raw, name)
-    if lower.endswith(".xlsx"):
-        raw = pd.read_excel(BytesIO(content), sheet_name=sheet or 0, engine="openpyxl")
+    if lower.endswith((".csv", ".xlsx")):
+        raw = read_tabular(content, name, sheet, max_rows=5000)
         return normalize_transactions(raw, name + (f" · sheet {sheet}" if sheet else ""))
     if lower.endswith(".pdf"):
         import pdfplumber
         frames = []
-        with pdfplumber.open(BytesIO(content)) as document:
-            for page_number, page in enumerate(document.pages, 1):
-                for table in page.extract_tables() or []:
-                    if len(table) >= 2:
-                        header = [str(cell or "").strip() for cell in table[0]]
-                        candidate = pd.DataFrame(table[1:], columns=header)
-                        try:
-                            frames.append(normalize_transactions(candidate,
-                                                                 f"{name} · page {page_number}"))
-                        except ValueError:
+        try:
+            with pdfplumber.open(BytesIO(content)) as document:
+                if len(document.pages) > 100:
+                    raise ValueError("Use a statement with at most 100 pages.")
+                for page_number, page in enumerate(document.pages, 1):
+                    for table in page.extract_tables() or []:
+                        if len(table) < 2:
                             continue
+                        header = [str(cell or "").strip() for cell in table[0]]
+                        labels = {_label(cell) for cell in header}
+                        if not (labels.intersection(ALIASES["Date"])
+                                and labels.intersection(ALIASES["Amount"] + ALIASES["Credit"] + ALIASES["Debit"])):
+                            continue
+                        candidate = pd.DataFrame(table[1:], columns=header)
+                        frames.append(normalize_transactions(candidate, f"{name} · page {page_number}"))
+                        if sum(len(frame) for frame in frames) > 5000:
+                            raise ValueError("Use at most 5,000 transaction rows per upload.")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Unable to read this PDF statement. Use a text-based PDF or export CSV/XLSX.") from exc
         if not frames:
             raise ValueError("No transaction table could be read from this PDF. Use a text-based statement or export CSV/XLSX from the provider.")
-        return pd.concat(frames, ignore_index=True).drop_duplicates().sort_values("Date")
+        return pd.concat(frames, ignore_index=True).sort_values("Date", kind="stable").reset_index(drop=True)
     raise ValueError("Upload a CSV, XLSX or text-based PDF statement.")

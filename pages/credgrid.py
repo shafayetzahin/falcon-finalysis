@@ -6,8 +6,9 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from components.result_state import input_signature, discard_changed_result, stable_editor_base
 
-from components.ui import header, repository
+from components.ui import header, repository, storage_notice
 from core.credit_engine import CREDIT_MODEL_VERSION, TRANSACTION_COLUMNS, analyze_credit
 from data.credit_data import evidence_checks, read_transaction_file, suggest_transaction_categories
 
@@ -41,6 +42,7 @@ def demo_transactions() -> pd.DataFrame:
 
 
 def load_demo() -> None:
+    st.session_state.cg_generation = st.session_state.get('cg_generation', 0) + 1
     st.session_state.cg_transactions = demo_transactions()
     st.session_state.cg_business_name = "Falcon Corner Shop (fictional)"
     st.session_state.cg_business_type = "Retail / online shop"
@@ -63,6 +65,7 @@ def load_demo() -> None:
 
 
 def restore_case(meta: dict, payload: dict) -> None:
+    st.session_state.cg_generation = st.session_state.get('cg_generation', 0) + 1
     for key, value in payload.get("inputs", {}).items():
         if key == "cg_rate_date" and isinstance(value, str):
             value = date.fromisoformat(value)
@@ -71,6 +74,7 @@ def restore_case(meta: dict, payload: dict) -> None:
     frame["Date"] = pd.to_datetime(frame["Date"], errors="coerce")
     st.session_state.cg_transactions = frame
     st.session_state.cg_case_id = meta["id"]
+    st.session_state.pop('cg_saved_signature', None)
     st.session_state.pop("cg_analysis", None)
 
 
@@ -169,10 +173,12 @@ st.progress(document_coverage, text=f"Document coverage: {document_coverage:.0%}
 uploaded = st.file_uploader("Bank, MFS or marketplace statement", type=["csv", "xlsx", "pdf"],
                             help="CSV/XLSX works best. PDFs must contain selectable transaction tables.")
 sheet = st.text_input("Excel worksheet name (optional)")
-if uploaded and st.button("Extract transaction candidates"):
+if uploaded and st.button("Extract transaction candidates", disabled=not consent):
     try:
         st.session_state.cg_transactions = read_transaction_file(
             uploaded.getvalue(), uploaded.name, sheet or None)
+        st.session_state.cg_generation = st.session_state.get('cg_generation', 0) + 1
+        st.session_state.cg_case_id = None
         st.session_state.pop("cg_analysis", None)
         st.success("Candidates extracted. Review dates, signs, categories, balances and source references below.")
     except (ValueError, UnicodeDecodeError) as exc:
@@ -186,10 +192,13 @@ if not isinstance(transactions, pd.DataFrame) or transactions.empty:
 st.caption("Positive Amount values are inflows; negative values are outflows. Extraction is assistive. Correct every material value before analysis.")
 if st.button("Suggest transaction categories"):
     st.session_state.cg_transactions = suggest_transaction_categories(transactions)
+    st.session_state.cg_generation = st.session_state.get('cg_generation', 0) + 1
     st.session_state.pop("cg_analysis", None)
     st.rerun()
+transaction_editor_key = f"cg_transaction_editor_{st.session_state.get('cg_generation', 0)}"
 reviewed_transactions = st.data_editor(
-    transactions, num_rows="dynamic", hide_index=True, width="stretch", key="cg_transaction_editor",
+    stable_editor_base(st.session_state, transaction_editor_key, transactions),
+    num_rows="dynamic", hide_index=True, width="stretch", key=transaction_editor_key,
     column_config={"Date": st.column_config.DateColumn(required=True, format="DD/MM/YYYY"),
                    "Amount": st.column_config.NumberColumn("Signed amount (BDT)", required=True),
                    "Balance": st.column_config.NumberColumn("Running balance (BDT)"),
@@ -222,6 +231,13 @@ reviewed_expenses = st.number_input(
     "Reviewed average monthly operating expenses (BDT; zero uses statement-derived outflows)",
     min_value=0.0, step=1_000.0, key="cg_reviewed_expenses")
 
+credit_signature = input_signature(reviewed_transactions, business_name, business_type, purpose,
+                                   consent, requested,
+                                   tenure, existing_debt, minimum_dscr, risk_free, operating_premium,
+                                   liquidity_premium, risk_premium, reviewed_documents,
+                                   benchmark_source, benchmark_date, reviewed_expenses, CREDIT_MODEL_VERSION)
+if discard_changed_result(st.session_state, 'cg_analysis', credit_signature):
+    st.info('Credit inputs or consent changed. Calculate again before saving, exporting or recording a decision.')
 if st.button("Calculate explainable credit analysis", type="primary", disabled=not consent):
     if not benchmark_source.strip():
         st.error("Enter the reviewed risk-free source or instrument.")
@@ -232,6 +248,7 @@ if st.button("Calculate explainable credit analysis", type="primary", disabled=n
                 risk_free / 100, operating_premium / 100, liquidity_premium / 100,
                 risk_premium / 100, document_coverage,
                 None if reviewed_expenses == 0 else reviewed_expenses)
+            st.session_state.cg_analysis_signature = credit_signature
         except ValueError as exc:
             st.error(str(exc))
 
@@ -245,7 +262,7 @@ score_cols = st.columns(4)
 score_cols[0].metric("CredGrid score", "Withheld" if analysis.score is None else f"{analysis.score:.1f} / 100")
 score_cols[1].metric("Profile band", analysis.band)
 score_cols[2].metric("Evidence confidence", f"{analysis.confidence:.0%}")
-score_cols[3].metric("Observed months", f"{int(analysis.profile['Months'])}")
+score_cols[3].metric("Observed months", f"{int(analysis.profile.get('Observed Months', analysis.profile['Months']))}")
 st.caption(f"Model {CREDIT_MODEL_VERSION}. The score is a transparent pilot scorecard. It is not a credit bureau score or a predicted probability of default.")
 
 cash_cols = st.columns(4)
@@ -289,7 +306,8 @@ if save_col.button("Save credit case", width="stretch"):
             business_name, case_payload(inputs, reviewed_transactions, analysis),
             st.session_state.get("cg_case_id"))
         st.session_state.cg_case_id = case_id
-        st.success("Credit case and model inputs saved locally.")
+        st.session_state.cg_saved_signature = credit_signature
+        st.success("Credit case and model inputs saved. " + storage_notice())
     except ValueError as exc:
         st.error(str(exc))
 report_col.download_button("Download reviewer report", report_html(
@@ -297,10 +315,11 @@ report_col.download_button("Download reviewer report", report_html(
     file_name="CredGrid_Reviewer_Report.html", mime="text/html", width="stretch")
 
 st.subheader("6 · Human decision and override record")
-if not st.session_state.get("cg_case_id"):
+if (not st.session_state.get("cg_case_id")
+        or st.session_state.get('cg_saved_signature') != credit_signature):
     st.info("Save the credit case before recording a human decision.")
 else:
-    with st.form("credit_decision"):
+    with st.form(f"credit_decision_{st.session_state.cg_case_id}_{credit_signature}"):
         decision = st.selectbox("Human decision", ["Approve", "Modify", "Decline"])
         decision_cols = st.columns(3)
         final_amount = decision_cols[0].number_input("Final amount (BDT)", min_value=0.0,
@@ -308,14 +327,15 @@ else:
         final_tenure = decision_cols[1].number_input("Final tenure (months)", min_value=1,
                                                      max_value=60, value=int(proposal["Tenure Months"]))
         final_rate = decision_cols[2].number_input("Final annual rate %", min_value=0.0,
-                                                   max_value=100.0,
                                                    value=float(proposal["Annual Proposed Rate"] * 100))
         reviewer = st.text_input("Reviewer name or staff ID")
         rationale = st.text_area("Decision rationale and any override explanation")
         confirmed = st.checkbox("I reviewed the source evidence, model limitations, applicable policy and final terms")
-        submitted = st.form_submit_button("Record final human decision", disabled=not confirmed)
+        submitted = st.form_submit_button("Record final human decision")
     if submitted:
-        if final_rate / 100 <= proposal["Risk Free Rate"] and decision != "Decline":
+        if not confirmed:
+            st.error("Confirm your review of the evidence, model limitations, policy and final terms before recording a decision.")
+        elif final_rate / 100 <= proposal["Risk Free Rate"] and decision != "Decline":
             st.error("The final lending rate must be higher than the reviewed risk-free reference rate.")
         else:
             try:

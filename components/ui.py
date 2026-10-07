@@ -49,6 +49,17 @@ def storage_notice() -> str:
     return 'Saved work is stored on this device. Download recovery copies regularly.'
 
 
+def reset_company_outputs() -> None:
+    """Do not carry a previous company's review or editor changes into a new project."""
+    for key in ('scenario', 'valuation_result', 'valuation_result_signature', 'pdf_bytes', 'xlsx_bytes',
+                'report_fingerprint', 'statement_extraction', 'statement_extraction_key', 'import_report'):
+        st.session_state.pop(key, None)
+    st.session_state['project_generation'] = st.session_state.get('project_generation', 0) + 1
+    for key in list(st.session_state):
+        if key.startswith('driver_'):
+            del st.session_state[key]
+
+
 def require_analysis():
     from components.accounts import require_account
     require_account(show_controls=False)

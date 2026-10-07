@@ -2,7 +2,8 @@
 from datetime import date
 import streamlit as st
 import pandas as pd
-from components.ui import repository, header
+from components.ui import repository, header, reset_company_outputs, storage_notice
+from components.result_state import input_signature
 from core.config import FIELDS, CURRENCIES
 from core.validation import validate
 from data.parsers import read_file, suggest_mapping, prepare
@@ -12,7 +13,7 @@ from data.recovery import project_recovery, read_recovery
 from data.provenance import (PROVENANCE_COLUMNS, provenance_for_frame,
                              provenance_from_evidence, merge_provenance, changed_provenance)
 
-header('Projects & Data', 'Create a company, import values, review data quality and save your analysis locally.')
+header('Projects & Data', 'Create a company, import values, review data quality and save your analysis.')
 repo = repository()
 with st.expander('Project recovery — download or restore'):
     st.caption('Recovery files include financial inputs, company details and source references. '
@@ -61,7 +62,7 @@ with start_cols[3]:
 tabs = st.tabs(['Company setup', 'Upload & map', 'Manual editor', 'Saved projects'])
 with tabs[0]:
     old = st.session_state.get('meta', {})
-    with st.form('company_setup'):
+    with st.form(f"company_setup_{st.session_state.get('project_generation', 0)}"):
         c1, c2 = st.columns(2)
         with c1:
             name = st.text_input('Company name', old.get('company_name', ''), max_chars=150)
@@ -93,7 +94,7 @@ with tabs[0]:
                 st.session_state.frame = pd.DataFrame({'Year': range(int(start), int(start)+count)}).reindex(columns=['Year']+FIELDS)
                 st.session_state.provenance = pd.DataFrame(columns=PROVENANCE_COLUMNS)
                 st.session_state.project_id = None
-                st.session_state.pop('scenario', None)
+            reset_company_outputs()
             st.success('Setup applied. Enter or upload financial figures, then Save project.')
             st.rerun()
 with tabs[1]:
@@ -130,7 +131,7 @@ with tabs[1]:
                                          placeholder='Example: Bank annual export')
             if st.button('Save column mapping', disabled=not mapping_name.strip()):
                 repo.save_import_mapping(mapping_name, mapping)
-                st.success('Reusable column mapping saved on this device.')
+                st.success('Column mapping saved. ' + storage_notice())
             if st.button('Import mapped data', type='primary'):
                 if 'meta' not in st.session_state:
                     st.error('Create company setup first so the reporting currency is explicit.')
@@ -138,11 +139,10 @@ with tabs[1]:
                     st.session_state.frame = prepare(raw, mapping)
                     source_type = 'CSV upload' if file.name.lower().endswith('.csv') else 'Excel upload'
                     reference = file.name + (f' · sheet {sheet}' if sheet else '')
-                    st.session_state.provenance = merge_provenance(
-                        st.session_state.get('provenance'),
-                        provenance_for_frame(st.session_state.frame, source_type, reference))
+                    st.session_state.provenance = provenance_for_frame(
+                        st.session_state.frame, source_type, reference)
                     st.session_state.meta['updated_at'] = stamp()
-                    st.session_state.pop('scenario', None)
+                    reset_company_outputs()
                     st.success('Imported. Review validation below and Save project to retain your changes.')
         except ValueError as exc:
             st.error(str(exc))
@@ -153,6 +153,17 @@ with tabs[1]:
     pdf_files = st.file_uploader('Annual report PDFs (upload more than one when needed to reach 3 years)',
                                  type=['pdf'], accept_multiple_files=True, key='annual_reports')
     layout_file = st.file_uploader('Or a statement-style Excel workbook', type=['xlsx'], key='statement_layout')
+    extraction_key = input_signature([(item.name, item.size) for item in pdf_files or []],
+                                     (layout_file.name, layout_file.size) if layout_file else None)
+    # Include a content hash so replacing a file under the same filename cannot show old candidates.
+    import hashlib
+    extraction_key += ''.join(hashlib.sha256(item.getvalue()).hexdigest() for item in pdf_files or [])
+    if layout_file and not pdf_files:
+        extraction_key += hashlib.sha256(layout_file.getvalue()).hexdigest()
+    if st.session_state.get('statement_extraction_key') != extraction_key:
+        if st.session_state.get('statement_extraction') is not None:
+            st.info('Statement files changed. Extract again to review the current documents.')
+        st.session_state.pop('statement_extraction', None)
     if st.button('Extract statement candidates', disabled=not pdf_files and not layout_file):
         try:
             if pdf_files:
@@ -160,6 +171,7 @@ with tabs[1]:
             else:
                 result = extract_workbook(layout_file.getvalue(), layout_file.name)
             st.session_state.statement_extraction = result
+            st.session_state.statement_extraction_key = extraction_key
         except ValueError as exc:
             st.error(str(exc))
     extraction = st.session_state.get('statement_extraction')
@@ -173,7 +185,8 @@ with tabs[1]:
         review_tab, evidence_tab, import_tab = st.tabs(['1 · Review values', '2 · Check source evidence', '3 · Import'])
         with review_tab:
             st.caption(f'Detected unit: {extraction.unit_hint}. Edit incorrect candidates or clear uncertain cells before importing.')
-            candidate = st.data_editor(extraction.frame, hide_index=True, width='stretch', key='extraction_editor')
+            candidate = st.data_editor(extraction.frame, hide_index=True, width='stretch',
+                                       key='extraction_editor_' + extraction_key)
             for note in extraction.notes:
                 st.caption(note)
         with evidence_tab:
@@ -184,7 +197,8 @@ with tabs[1]:
                                       index={'Unknown': 0, 'Thousands': 1, 'Millions': 2}.get(extraction.unit_hint, 0))
             multiplier = {'Full units': 1, 'Thousands': 1_000, 'Millions': 1_000_000}[scale_name]
             merge = st.checkbox('Merge with years already in the current project', value='frame' in st.session_state)
-            reviewed_ok = st.checkbox('I reviewed the extracted values and source evidence')
+            reviewed_ok = st.checkbox('I reviewed the extracted values and source evidence',
+                                      key='statement_reviewed_' + extraction_key)
             import_reviewed = st.button('Import reviewed statement values', type='primary', disabled=not reviewed_ok)
         if import_reviewed:
             if 'meta' not in st.session_state:
@@ -200,8 +214,10 @@ with tabs[1]:
                         combined = reviewed
                     st.session_state.frame = prepare(combined)
                     st.session_state.provenance = merge_provenance(
-                        st.session_state.get('provenance'),
-                        provenance_from_evidence(extraction.evidence, accepted_frame=reviewed))
+                        st.session_state.get('provenance') if merge else None,
+                        provenance_from_evidence(extraction.evidence, accepted_frame=reviewed,
+                                                 multiplier=multiplier),
+                        accepted_frame=st.session_state.frame)
                     st.session_state.meta['updated_at'] = stamp()
                     st.session_state.pop('scenario', None)
                     st.session_state.import_report = {
@@ -210,6 +226,7 @@ with tabs[1]:
                         'Source locations': int(evidence_sources),
                         'Applied scale': scale_name,
                     }
+                    st.session_state['project_generation'] = st.session_state.get('project_generation', 0) + 1
                     st.success('Reviewed values imported. Check reconciliation messages below, then Save project.')
                 except ValueError as exc:
                     st.error(str(exc))
@@ -221,17 +238,21 @@ with tabs[2]:
         st.caption('Edit full currency values. Scroll horizontally for all fields. Add or remove rows to retain 3–10 consecutive years. Blank means unavailable.')
         with st.form('editor_form'):
             edited = st.data_editor(st.session_state.frame, num_rows='dynamic', hide_index=True, width='stretch',
-                                    column_config={'Year': st.column_config.NumberColumn(format='%d', required=True)}, key='statement_editor')
+                                    column_config={'Year': st.column_config.NumberColumn(format='%d', required=True)},
+                                    key=f"statement_editor_{st.session_state.get('project_generation', 0)}")
             apply = st.form_submit_button('Validate & apply edits', type='primary')
         if apply:
             try:
                 before = st.session_state.frame.copy()
                 st.session_state.frame = prepare(edited)
                 st.session_state.provenance = merge_provenance(
-                    st.session_state.get('provenance'), changed_provenance(before, st.session_state.frame))
+                    st.session_state.get('provenance'), changed_provenance(before, st.session_state.frame),
+                    accepted_frame=st.session_state.frame)
                 st.session_state.meta['updated_at'] = stamp()
                 st.session_state.pop('scenario', None)
                 st.success('Edits applied. Save project to keep them after restart.')
+                st.session_state['project_generation'] = st.session_state.get('project_generation', 0) + 1
+                st.rerun()
             except ValueError as exc:
                 st.error(str(exc))
     else:
@@ -246,7 +267,7 @@ with tabs[3]:
             st.session_state.meta, st.session_state.frame = meta, frame
             st.session_state.provenance = repo.provenance(chosen)
             st.session_state.project_id, st.session_state.project_name = chosen, meta['name']
-            st.session_state.pop('scenario', None)
+            reset_company_outputs()
             st.rerun()
         if cols[1].button('Duplicate selected project'):
             repo.duplicate(chosen)

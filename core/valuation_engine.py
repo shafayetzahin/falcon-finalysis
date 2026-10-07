@@ -39,20 +39,28 @@ def calculate_wacc(market_cap: float, debt: float, risk_free_rate: float,
                                     pre_tax_cost_of_debt) < 0:
         raise ValueError("Rates must be nonnegative and tax must be below 100%.")
     capital = market_cap + debt
+    if not np.isfinite(capital):
+        raise ValueError("Total capital exceeds the supported numeric range.")
     equity_weight = market_cap / capital
     debt_weight = debt / capital
     cost_of_equity = risk_free_rate + beta * equity_risk_premium
     after_tax_debt = pre_tax_cost_of_debt * (1 - tax_rate)
     wacc = equity_weight * cost_of_equity + debt_weight * after_tax_debt
+    if not np.isfinite(wacc):
+        raise ValueError("WACC exceeds the supported numeric range.")
     return WACCResult(cost_of_equity, after_tax_debt, equity_weight, debt_weight, wacc)
 
 
 def _dcf_value(base_fcff: float, growth_rates: list[float], wacc: float,
                terminal_growth: float) -> tuple[pd.DataFrame, float, float]:
+    if not all(np.isfinite([base_fcff, wacc, terminal_growth, *growth_rates])):
+        raise ValueError("DCF inputs must be finite numbers.")
     if base_fcff <= 0:
         raise ValueError("Base FCFF must be greater than zero.")
     if not growth_rates:
         raise ValueError("Provide at least one forecast growth rate.")
+    if wacc < 0 or terminal_growth <= -1 or any(growth <= -1 for growth in growth_rates):
+        raise ValueError("WACC cannot be negative and growth rates must be greater than -100%.")
     if wacc <= terminal_growth:
         raise ValueError("WACC must be higher than terminal growth.")
     rows, fcff = [], float(base_fcff)
@@ -65,12 +73,16 @@ def _dcf_value(base_fcff: float, growth_rates: list[float], wacc: float,
     terminal_pv = terminal_value / (1 + wacc) ** len(growth_rates)
     forecast = pd.DataFrame(rows)
     enterprise_value = float(forecast["PV of FCFF"].sum() + terminal_pv)
+    if not np.isfinite(enterprise_value) or not np.isfinite(forecast.to_numpy()).all():
+        raise ValueError("DCF exceeds the supported numeric range; review the growth assumptions.")
     return forecast, enterprise_value, float(terminal_pv)
 
 
 def discounted_cash_flow(base_fcff: float, growth_rates: list[float], wacc: float,
                          terminal_growth: float, cash: float, debt: float,
                          shares: float) -> DCFResult:
+    if not all(np.isfinite([cash, debt, shares])):
+        raise ValueError("Cash, debt and shares must be finite numbers.")
     if shares <= 0:
         raise ValueError("Shares outstanding must be greater than zero.")
     if cash < 0 or debt < 0:
@@ -79,13 +91,17 @@ def discounted_cash_flow(base_fcff: float, growth_rates: list[float], wacc: floa
         base_fcff, growth_rates, wacc, terminal_growth)
     equity_value = enterprise_value + cash - debt
     value_per_share = equity_value / shares
-    wacc_range = np.linspace(max(wacc - .02, terminal_growth + .005), wacc + .02, 5)
-    growth_range = np.linspace(max(0.0, terminal_growth - .02),
-                               min(terminal_growth + .02, wacc_range.min() - .005), 5)
+    if not np.isfinite(equity_value) or not np.isfinite(value_per_share):
+        raise ValueError("Equity value exceeds the supported numeric range.")
+    wacc_range = np.linspace(max(0.0, wacc - .02), wacc + .02, 5)
+    growth_range = np.linspace(max(-.99, terminal_growth - .02), terminal_growth + .02, 5)
     values = []
     for rate in wacc_range:
         row = []
         for growth in growth_range:
+            if rate <= growth:
+                row.append(np.nan)
+                continue
             _, ev, _ = _dcf_value(base_fcff, growth_rates, float(rate), float(growth))
             row.append((ev + cash - debt) / shares)
         values.append(row)
@@ -104,9 +120,13 @@ def comparable_valuation(peers: pd.DataFrame, revenue: float, ebitda: float,
     required = ["EV/Revenue", "EV/EBITDA", "P/E"]
     if not set(required).issubset(peers):
         raise ValueError("Peer table requires EV/Revenue, EV/EBITDA and P/E columns.")
+    if not all(np.isfinite([revenue, ebitda, net_income, debt, cash, shares])):
+        raise ValueError("Comparable valuation inputs must be finite numbers.")
     if shares <= 0:
         raise ValueError("Shares outstanding must be greater than zero.")
-    clean = peers[required].apply(pd.to_numeric, errors="coerce")
+    if cash < 0 or debt < 0:
+        raise ValueError("Cash and debt cannot be negative.")
+    clean = peers[required].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     rows = []
     for metric, denominator, enterprise_based in [
         ("EV/Revenue", revenue, True), ("EV/EBITDA", ebitda, True), ("P/E", net_income, False)
@@ -120,33 +140,44 @@ def comparable_valuation(peers: pd.DataFrame, revenue: float, ebitda: float,
                                 ("High", values.quantile(.75))]:
             headline_value = float(denominator * multiple)
             equity_value = headline_value + cash - debt if enterprise_based else headline_value
+            if not np.isfinite(equity_value) or not np.isfinite(equity_value / shares):
+                raise ValueError("Comparable valuation exceeds the supported numeric range.")
             rows.append({"Method": metric, "Case": label, "Selected multiple": float(multiple),
                          "Implied equity value": equity_value,
                          "Implied value per share": equity_value / shares})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["Method", "Case", "Selected multiple", "Implied equity value",
+                                       "Implied value per share"])
 
 
 def roic_reinvestment(frame: pd.DataFrame, tax_rate: float) -> pd.DataFrame:
     """Calculate screening ROIC, reinvestment and intrinsic-growth history."""
+    if not np.isfinite(tax_rate) or not 0 <= tax_rate < 1:
+        raise ValueError("Tax rate must be finite and between 0% and 100% exclusive.")
+    if frame.empty or "Year" not in frame:
+        raise ValueError("ROIC requires a nonempty table with fiscal years.")
     data = frame.copy().sort_values("Year")
 
     def numeric(name: str) -> pd.Series:
         values = data[name] if name in data else pd.Series(np.nan, index=data.index)
-        return pd.to_numeric(values, errors="coerce")
+        return pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan)
 
     ebit = numeric("EBIT")
-    debt = numeric("Short-Term Debt").fillna(0) + numeric("Long-Term Debt").fillna(0)
+    debt = numeric("Short-Term Debt") + numeric("Long-Term Debt")
     equity = numeric("Shareholders Equity")
-    cash = numeric("Cash").fillna(0)
+    cash = numeric("Cash")
     invested = debt + equity - cash
     nopat = ebit * (1 - tax_rate)
-    capex = numeric("Capital Expenditure").fillna(0)
-    depreciation = numeric("Depreciation").fillna(0)
-    working_capital = (numeric("Total Current Assets") - numeric("Total Current Liabilities"))
+    capex = numeric("Capital Expenditure")
+    depreciation = numeric("Depreciation")
+    working_capital = (numeric("Total Current Assets") - cash
+                       - numeric("Total Current Liabilities") + numeric("Short-Term Debt"))
     reinvestment = capex - depreciation + working_capital.diff()
-    rate = reinvestment / nopat.replace(0, np.nan)
-    roic = nopat / invested.replace(0, np.nan)
+    rate = reinvestment / nopat.where(nopat > 0)
+    average_invested = (invested + invested.shift()) / 2
+    average_invested.iloc[0] = invested.iloc[0]
+    roic = nopat / average_invested.where((average_invested > 0) & (invested > 0))
     return pd.DataFrame({"Year": data["Year"].astype(int), "NOPAT": nopat,
-                         "Invested Capital": invested, "ROIC": roic,
+                         "Invested Capital": invested, "Average Invested Capital": average_invested, "ROIC": roic,
+                         "Operating Working Capital": working_capital,
                          "Reinvestment": reinvestment, "Reinvestment Rate": rate,
                          "Intrinsic Growth": roic * rate})

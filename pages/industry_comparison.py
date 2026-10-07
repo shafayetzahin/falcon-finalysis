@@ -46,12 +46,20 @@ manual = st.text_input("Additional tickers (optional, comma-separated)",
                        help="Use this when a company is missing from the packaged suggestions.")
 manual_tickers = [item.strip().upper() for item in manual.split(",") if item.strip()]
 tickers = list(dict.fromkeys([anchor] + selected + manual_tickers))
+if len(tickers) > 8:
+    st.error('Choose at most eight companies, including the anchor and additional tickers.')
 st.write("**Comparison set:** " + " · ".join(tickers))
 
 exchange_tab, upload_tab = st.tabs(["Exchange-provided metrics", "Uploaded full statements"])
 with exchange_tab:
     st.caption("The exchanges provide a limited annual summary. Missing metrics remain blank; the app does not estimate them.")
-    if st.button("Load exchange comparison", type="primary", disabled=len(tickers) < 2):
+    comparison_key = (exchange, tuple(tickers))
+    if st.session_state.get('industry_exchange_key') != comparison_key:
+        if st.session_state.get('industry_exchange_details'):
+            st.info('The comparison set changed. Load exchange comparison to refresh the companies shown.')
+        for state_key in ('industry_exchange_details', 'industry_exchange_sources', 'industry_exchange_failures'):
+            st.session_state.pop(state_key, None)
+    if st.button("Load exchange comparison", type="primary", disabled=not 2 <= len(tickers) <= 8):
         loaded, failures, sources = {}, [], {}
         for ticker in tickers:
             try:
@@ -63,6 +71,7 @@ with exchange_tab:
         st.session_state.industry_exchange_details = loaded
         st.session_state.industry_exchange_sources = sources
         st.session_state.industry_exchange_failures = failures
+        st.session_state.industry_exchange_key = comparison_key
     for failure in st.session_state.get("industry_exchange_failures", []):
         st.warning(failure)
     details = st.session_state.get("industry_exchange_details", {})
@@ -79,8 +88,10 @@ with exchange_tab:
         comparison = exchange_metric_comparison(details, year)
         formatters = {"Net Income": "{:,.1f}", "Basic EPS": "{:,.2f}",
                       "NAV per Share": "{:,.2f}", "Dividend": "{:.2f}%",
+                      "Cash Dividend": "{:.2f}%", "Stock Dividend": "{:.2f}%",
                       "Dividend Yield": "{:.2f}%"}
         st.dataframe(comparison.style.format(formatters, na_rep="N/A"), width="stretch")
+        st.caption('Cash and stock dividend percentages are separate. A combined dividend is shown only when the source reports a total or both components.')
         chart_metric = st.selectbox("Chart metric", EXCHANGE_METRICS,
                                     index=EXCHANGE_METRICS.index("Basic EPS"))
         st.bar_chart(pd.to_numeric(comparison[chart_metric], errors="coerce"))
@@ -106,12 +117,16 @@ with upload_tab:
     if include_active and "frame" in st.session_state:
         analyses[st.session_state.get("meta", {}).get("company_name", "Active company")] = cached_analysis(
             st.session_state.frame, st.session_state.get("tolerance", .01))
-    if len(uploads) > 20:
-        st.error("Select at most 20 company files.")
+    if len(uploads) + len(analyses) > 20:
+        st.error("Select at most 20 companies, including the active project.")
     else:
         for upload in uploads:
             try:
-                analyses[upload.name.rsplit(".", 1)[0]] = cached_analysis(
+                label = upload.name.rsplit(".", 1)[0]
+                if label in analyses:
+                    st.error(f"{upload.name}: duplicate company label. Rename the file before comparing.")
+                    continue
+                analyses[label] = cached_analysis(
                     prepare(read_file(upload.getvalue(), upload.name)), .01)
             except ValueError as exc:
                 st.error(f"{upload.name}: {exc}")

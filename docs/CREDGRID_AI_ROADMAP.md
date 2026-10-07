@@ -12,6 +12,14 @@ It is not mixed into the Falcon Finalysis company score and is never presented a
 - Mandatory benchmark source and as-of date; no silently assumed Bangladesh rate.
 - Local saved cases, reviewer HTML report and human Approve/Modify/Decline audit entries.
 - Fictional demonstration case and automated formula, parser, storage and UI tests.
+- Model `CG-CF-1.2` preserves the full calendar-month span and withholds the score/proposal
+  when internal months have no statement transactions. Missing balance evidence earns no balance points.
+- Reviewed financing, owner, transfer and personal inflows are excluded from modeled repayment
+  capacity. Unknown counted receipt categories remain explicitly unverified revenue.
+- Categorized loan repayments are separated from operating expenses. Capacity uses the greater
+  of declared and observed average debt service, counted once.
+- Changing consent or inputs removes stale scores, proposals and exports. A saved current case and
+  explicit confirmation at form submission are required before recording the human decision.
 
 ## Intended workflow
 

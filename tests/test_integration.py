@@ -162,6 +162,8 @@ def test_credgrid_demo_requires_human_review_and_calculates(app):
 
 def test_valuation_lab_builds_dcf_and_football_field(app):
     app.switch_page('pages/valuation.py').run()
+    next(field for field in app.checkbox
+         if field.label == 'I verified shares outstanding and the base FCFF against the source statements').check().run()
     next(field for field in app.text_input
          if field.label == 'Market assumptions source and as-of date').set_value(
              'Reviewed demonstration inputs · 2026-09-26').run()
@@ -174,7 +176,8 @@ def test_valuation_lab_builds_dcf_and_football_field(app):
 
 def test_manual_editor_applies_input(app):
     app.switch_page('pages/projects.py').run()
-    app.session_state['statement_editor'] = {'edited_rows': {4: {'Revenue': 1_800_000_000}},
+    editor_key = f"statement_editor_{app.session_state['project_generation']}"
+    app.session_state[editor_key] = {'edited_rows': {4: {'Revenue': 1_800_000_000}},
                                              'added_rows': [], 'deleted_rows': []}
     next(b for b in app.button if b.label == 'Validate & apply edits').click().run()
     assert app.session_state['frame'].iloc[-1]['Revenue'] == 1_800_000_000

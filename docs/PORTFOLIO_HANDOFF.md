@@ -2,7 +2,7 @@
 
 ## 1. What was built
 
-A modular, local Streamlit application with 15 views for company setup, listed-company lookup, statement
+A modular Streamlit application with 22 views for company setup, listed-company lookup, statement
 analysis, financial ratios, DuPont, working capital, cash flow, multi-year trends,
 peer comparison, deterministic insights, transparent financial health scoring,
 operating scenarios and PDF/Excel reporting. SQLite saves projects and scenario
@@ -78,8 +78,11 @@ The current build supports 3–10 consecutive annual periods, values-only XLSX/C
 review-first text-PDF extraction and the supplied schema. Scenario cash flows and returns are simplified proxies. Generic scoring is
 not predictive or an industry credit rating. Excel exports are numerical snapshots.
 Peers are uploaded per session. Public DSE/CSE company facts and historical prices are
-available with an upload fallback. No AI, OCR, DCF, authentication or cloud deployment is included. See README for
-font, theme, security and import-layout limitations.
+available with an upload fallback. Portfolio analysis, DCF valuation, industry comparison and a
+CredGrid cash-flow credit pilot are included. The public Streamlit demo uses temporary session storage.
+Managed sign-in and persistent private workspace setup are prepared; provider activation, encrypted
+hosting and scheduled backups require deployment configuration. OCR and external generative AI are
+not included. See README, ACCOUNT_SETUP.md and QA.md for current capabilities and limits.
 
 ## 9. Recommended V1.1
 
