@@ -3,8 +3,8 @@
 Verified on Windows with Python 3.12, Streamlit 1.63.0, pandas 3.0.1,
 NumPy 2.3.5, Plotly 7.0.0, openpyxl 3.1.5 and ReportLab 4.4.9.
 The runtime and development requirement files were installed successfully into
-the workspace test environment. Python 3.11 is the minimum target; that separate
-interpreter version was not available for a second platform run.
+the workspace test environment. GitHub CI also passed the release on Python 3.11
+and 3.12 on Linux. The desktop verification used Python 3.12 on Windows.
 
 ## Automated coverage
 
@@ -72,6 +72,8 @@ markers were verified again after the parser repair. The local staging browser v
 the dismissible first-session notice, the complete-demo button, chart/metric rendering,
 light/dark navigation and readable dropdown options. Caption opacity and help-icon
 stroke colors were repaired based on computed browser styles and screenshots.
+The deployed home page was also inspected at 390 px width. Task cards stack and
+the navigation collapses; mobile top padding was increased to clear Streamlit's fixed toolbar.
 
 The following paragraphs record earlier delivery checks, not an additional current device run.
 
